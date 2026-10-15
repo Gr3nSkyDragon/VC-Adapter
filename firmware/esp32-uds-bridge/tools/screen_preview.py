@@ -1,4 +1,4 @@
-# Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+# Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
 """Previews the board's screen on a PC, without flashing: builds the firmware's own drawing code (main/scene.c,
 main/screen.c) with a PC compiler, draws every clip listed in tools/screen_preview/preview.c and writes them as pictures.
 

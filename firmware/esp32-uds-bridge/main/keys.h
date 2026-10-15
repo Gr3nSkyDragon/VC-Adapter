@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * The 3DS key the Game Boy wrapper needs, stored on the board (NVS) so that a cartridge, which cannot supply one, can trade: the UDS
  * data key, AES key slot 0x2D (KeyN, the "normal" key Azahar reads from aes_keys.txt). It is written once by the host

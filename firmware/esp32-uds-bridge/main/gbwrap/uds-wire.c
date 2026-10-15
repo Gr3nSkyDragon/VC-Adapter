@@ -1,8 +1,6 @@
-/* Copyright (c) 2026 mgba_ldn contributors
+/* Copyright (c) 2026 Gr3nSkyDragon
  *
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * Licensed under the GNU General Public License, version 3 or any later version. See LICENSE at the top of this repository. */
 #include <mgba/internal/gb/sio/uds-wire.h>
 
 #include <stdarg.h>

@@ -1,4 +1,4 @@
-# Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+# Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
 """PNG reading and writing, and animated GIF writing, with nothing outside the standard library.
 
 The screen tools use these so that no image package (Pillow) has to be installed.

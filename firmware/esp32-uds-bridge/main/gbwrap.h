@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * The Game Boy wrapper mode. Without it the board is the raw radio Azahar drives (main.c). In it, the board itself joins a 3DS
  * running the Virtual Console Pokemon games (Red, Blue, Yellow, Gold, Silver, Crystal) and stands in for that console's partner on a

@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * The board's screen on a PC: the firmware's own scene.c and screen.c, compiled for the host, draw each clip below frame by
  * frame, 50 ms apart as display.c does. tools/screen_preview.py builds this, runs it and turns the frames into PNG and GIF

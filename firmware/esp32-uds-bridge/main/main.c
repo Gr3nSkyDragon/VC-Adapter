@@ -1,4 +1,4 @@
-﻿/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+﻿/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * ESP32-S3 UDS radio bridge for Azahar on Android. The phone talks to this board over the chip's
  * native USB Serial/JTAG port with the framing in uds_wire.h; the board is a raw 802.11 radio for

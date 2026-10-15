@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * An optional SSD1306 128x64 OLED on I2C: SDA GPIO8, SCL GPIO9 on the ESP32-S3 (GPIO21/22 on a classic ESP32, GPIO6/7 on a
  * C3, GPIO22/23 on a C6), VCC 3V3. At boot

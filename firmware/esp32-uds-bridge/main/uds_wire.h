@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * Serial framing between Azahar (Android) and this firmware. Mirrors
  * src/core/hle/service/nwm/uds_real/esp32_wire.{h,cpp} in the emulator - keep the two in step

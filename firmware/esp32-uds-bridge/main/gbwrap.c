@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * The Game Boy wrapper mode (see gbwrap.h). The join on the air below is mGBA's uds-air-radio.c and uds-joiner.c with this board's
  * radio (radio.h) in place of the USB link to it: the same scan, host choice, authentication, association, CCMP and replay check.

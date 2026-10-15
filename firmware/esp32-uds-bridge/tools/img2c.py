@@ -1,4 +1,4 @@
-# Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+# Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
 """Turns PNG pictures into one-bit images for the board's screen, as a C header that main/ includes.
 
     python tools/img2c.py -o main/images.h art/ball.png art/cable.png

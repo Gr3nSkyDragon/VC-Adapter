@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * The 802.11 side: a station interface that is never connected, started with the MAC of the
  * emulated 3DS so the hardware acknowledges unicast frames addressed to it, plus promiscuous

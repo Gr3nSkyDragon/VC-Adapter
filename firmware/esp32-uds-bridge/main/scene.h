@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * What the optional screen shows: the board's own state, drawn from a snapshot the display task takes every frame. Drawing only
  * (screen.h): the panel itself is display.c's.

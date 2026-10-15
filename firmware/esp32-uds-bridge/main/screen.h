@@ -1,4 +1,4 @@
-/* Copyright 2026 Azahar Emulator Project. Licensed under GPLv2 or any later version.
+/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
  * A 128x64 one-bit framebuffer in the SSD1306's own memory order (eight pages of 128 columns; byte x + 128 * (y / 8) holds
  * rows y & ~7 .. y | 7, bit 0 at the top), so a frame goes to the panel as it is. Drawing only: no hardware here.
