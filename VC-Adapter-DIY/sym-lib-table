@@ -1,0 +1,6 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "BOB 12009")(type "KiCad")(uri "${KIPRJMOD}/BOB-12009/BOB-12009.kicad_sym")(options "")(descr ""))
+  (lib (name "XIao S3")(type "KiCad")(uri "${KIPRJMOD}/XIAO_ESP32_S3/XIAO_ESP32_S3.kicad_sym")(options "")(descr ""))
+  (lib (name "GBA connector")(type "KiCad")(uri "${KIPRJMOD}/gba_linkport/gba_linkport.kicad_sym")(options "")(descr "From GB-Link-USB-DIY (MIT, see gba_linkport/LICENSE)"))
+)

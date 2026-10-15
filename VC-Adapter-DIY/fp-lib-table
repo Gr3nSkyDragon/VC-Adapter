@@ -1,0 +1,7 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Xiao S3")(type "KiCad")(uri "${KIPRJMOD}/XIAO_ESP32_S3/XIAO_ESP32_S3.kicad_pretty")(options "")(descr ""))
+  (lib (name "BOB-12009")(type "KiCad")(uri "${KIPRJMOD}/BOB-12009/CONV_BOB-12009.kicad_pretty")(options "")(descr ""))
+  (lib (name "GBA connector")(type "KiCad")(uri "${KIPRJMOD}/gba_linkport/gba_linkport.pretty")(options "")(descr "From GB-Link-USB-DIY (MIT, see gba_linkport/LICENSE)"))
+  (lib (name "More Xiao Files")(type "KiCad")(uri "${KIPRJMOD}/New_XIAO_Series_Footprints/New_XIAO_Series_Footprints")(options "")(descr ""))
+)

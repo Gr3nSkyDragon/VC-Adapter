@@ -1,0 +1,55 @@
+/* Copyright (c) 2026 Gr3nSkyDragon
+ *
+ * Licensed under the GNU General Public License, version 3 or any later version. See LICENSE at the top of this repository. */
+#ifndef GBA_SIO_ESP32_SERIAL_H
+#define GBA_SIO_ESP32_SERIAL_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+// A plain serial (USB CDC) port. The built-in implementation is Windows only (elsewhere Open just fails); a host
+// application on another platform installs its own with Esp32SerialSetOps, without the backend knowing the difference.
+struct Esp32Serial;
+
+// `name` is e.g. "COM4". The board's native USB Serial/JTAG port resets the chip when opened (the firmware's own
+// notes say so), so callers should give it a few seconds to boot before talking.
+struct Esp32Serial* Esp32SerialOpen(const char* name, unsigned baud);
+void Esp32SerialClose(struct Esp32Serial*);
+// Non-blocking: returns the number of bytes read (possibly 0), or -1 if the port failed.
+int Esp32SerialRead(struct Esp32Serial*, uint8_t* buffer, size_t capacity);
+bool Esp32SerialWrite(struct Esp32Serial*, const void* data, size_t length);
+
+// Looks for the board among the ports Windows currently knows and writes its name (e.g. "COM4") to `out`. First an
+// Espressif native USB Serial/JTAG device (VID 303A - the S3/C3/C6 boards' USB connector), then the USB-to-UART bridges
+// the other boards use (Silicon Labs CP210x 10C4, WCH CH340/CH9102 1A86, FTDI 0403). Returns false if none is present.
+bool Esp32SerialFindEspressif(char* out, size_t capacity);
+
+// Every such board present right now, in the order Esp32SerialFindEspressif would pick them. Returns how many were
+// written (at most `max`). `description` names the USB interface ("Espressif USB", "CP210x", ...) and may be empty.
+struct Esp32SerialPortInfo {
+	char name[32];
+	char description[32];
+};
+size_t Esp32SerialListEspressif(struct Esp32SerialPortInfo* out, size_t max);
+
+// The first serial port of a present USB device with this vendor id, e.g. 0x2FE3 for a GB-Link (Pico), whose USB serial function
+// speaks the Pico's 'GB' frames. Built-in implementation only (Windows); false elsewhere or when none is present.
+bool Esp32SerialFindVendor(uint16_t vendorId, char* out, size_t capacity);
+
+// The five operations above, as a table a host application can supply. `struct Esp32Serial` is opaque: an implementation
+// defines it however it likes (a Win32 handle, a JNI reference to an Android USB connection, ...). `find` is the
+// auto-detection hook; where the host application has already been handed a specific device it can simply report that
+// device's name. All of them are called from the backend's I/O thread, never from the emulation thread.
+struct Esp32SerialOps {
+	struct Esp32Serial* (*open)(const char* name, unsigned baud);
+	void (*close)(struct Esp32Serial*);
+	int (*read)(struct Esp32Serial*, uint8_t* buffer, size_t capacity);
+	bool (*write)(struct Esp32Serial*, const void* data, size_t length);
+	bool (*find)(char* out, size_t capacity);
+};
+
+// Installs `ops` in place of the built-in implementation; NULL restores the built-in one. Call before the backend is used.
+void Esp32SerialSetOps(const struct Esp32SerialOps* ops);
+
+#endif

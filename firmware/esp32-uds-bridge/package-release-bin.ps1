@@ -2,11 +2,11 @@
 # offset 0x0) for a GitHub release, so users can flash without installing ESP-IDF.
 #
 # Run it from an "ESP-IDF 5.2 PowerShell" (Desktop/Start menu shortcut):
-#   .\package-release-bin.ps1                       # writes ..\..\..\release\esp32-uds-bridge-fw<ver>-esp32s3.bin
+#   .\package-release-bin.ps1                       # writes ..\..\release\esp32-uds-bridge-fw<ver>-esp32s3.bin
 #   .\package-release-bin.ps1 -OutputDir C:\some\folder
 
 param(
-    [string]$OutputDir = (Join-Path $PSScriptRoot "..\..\..\release")
+    [string]$OutputDir = (Join-Path $PSScriptRoot "..\..\release")
 )
 
 $ErrorActionPreference = "Stop"

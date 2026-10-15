@@ -1,0 +1,12 @@
+# Release images (firmware .bin, installer .exe) go to GitHub Releases, not into git.
+/release/
+build/
+
+# KiCad: local history (its own git repository), per-user view settings, backups, locks, autosaves.
+.history/
+*.kicad_prl
+*-backups/
+fp-info-cache
+*.lck
+_autosave-*
+\#auto_saved_files\#
