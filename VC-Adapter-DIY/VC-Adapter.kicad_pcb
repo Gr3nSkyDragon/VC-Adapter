@@ -1723,17 +1723,6 @@
 				(checksum "1D85CB14BCF31E87E0766728A59C3C26")
 			)
 		)
-		(model "${KIPRJMOD}/gba_linkport/gba_linkport-Body.step"
-			(offset
-				(xyz 2 0 0)
-			)
-			(scale
-				(xyz 1 1 1)
-			)
-			(rotate
-				(xyz -0 -0 -180)
-			)
-		)
 	)
 	(gr_poly
 		(pts
