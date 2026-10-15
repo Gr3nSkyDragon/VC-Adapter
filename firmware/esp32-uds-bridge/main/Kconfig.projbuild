@@ -18,4 +18,58 @@ config UDS_PICO_LINK_RX_GPIO
     depends on UDS_PICO_LINK
     default 1
 
+config UDS_LINK_PORT
+    bool "Game Boy link port wired to GPIOs (no GB-Link)"
+    default n
+    help
+        A GBA/GBC/Game Boy link port wired to this board through a level shifter, with no GB-Link: the board clocks the cartridge
+        itself, as the GB-Link's Pico would. With no host on USB and the 3DS key stored, the board runs the Game Boy wrapper on its
+        own; a host's HELLO takes the board back, and mGBA's uds-gblink-relay --port starts it with the log on the PC. The defaults
+        are the shared VC-Adapter / GB-Link pinout on a Seeed XIAO ESP32-S3: SC on D0, SI on D1, SO on D2, SD on D3. SI and SO are
+        named from this board's side, as on the GB-Link: this board's SI takes the console's SO, its SO feeds the console's SI. See
+        the README's "GBA link port". The defaults share GPIO1 and GPIO2 with UDS_PICO_LINK's: to build both in, move one of them.
+
+config UDS_LINK_PORT_SC_GPIO
+    int "GPIO for SC, the clock (port pin 5)"
+    depends on UDS_LINK_PORT
+    default 1
+
+config UDS_LINK_PORT_SI_GPIO
+    int "GPIO for SI, this board's serial in (from the console's SO, port pin 2)"
+    depends on UDS_LINK_PORT
+    default 2
+
+config UDS_LINK_PORT_SO_GPIO
+    int "GPIO for SO, this board's serial out (to the console's SI, port pin 3)"
+    depends on UDS_LINK_PORT
+    default 3
+
+config UDS_LINK_PORT_SD_GPIO
+    int "GPIO for SD (port pin 4), -1 for none"
+    depends on UDS_LINK_PORT
+    range -1 48
+    default 4
+    help
+        Wired for the shared pinout, unused in a Game Boy's link (only GBA multiplayer uses SD): the pin is held as an input with no
+        pull, so it never drives the line.
+
+config UDS_LINK_PORT_SENSE_GPIO
+    int "ADC1 GPIO reading the port's VCC (pin 1) through a 1:2 divider, -1 for none"
+    depends on UDS_LINK_PORT
+    range -1 48
+    default -1
+    help
+        Two equal resistors (100k each) from the port's VCC to GND, their middle to this pin (an ADC1 pin: GPIO1 to GPIO10 on the
+        ESP32-S3; the XIAO's D4 is GPIO5). With it the board knows whether a console is on the port and in GB/GBC mode (5 V) or
+        running a GBA game (3.3 V): it starts on its own only for a Game Boy, and stops when the console goes off. Without it the
+        board assumes a Game Boy is there.
+
+config UDS_LINK_PORT_HALF_PERIOD_US
+    int "Half a clock period, in microseconds"
+    depends on UDS_LINK_PORT
+    range 2 1000
+    default 61
+    help
+        61 is a Game Boy's own internal clock (8192 Hz), the speed the games are written for.
+
 endmenu

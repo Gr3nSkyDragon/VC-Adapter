@@ -18,6 +18,7 @@
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include "keys.h"
+#include "linkport.h"
 #include "radio.h"
 #include "uds_wire.h"
 
@@ -133,7 +134,8 @@ static unsigned s_exchanges;
 /* Who is on the other end of the cartridge's cable (GB_START flag bit 1, see uds_wire.h). XFER: the cartridge is the master and the
  * host sends each transfer it clocked. PICO: the cartridge sits behind a GB-Link Pico in Game Boy mode, which only clocks, so this
  * board drives the clock (uds-clock.c) and the Pico shifts each byte; the Pico is a real one or mGBA standing in for one, and either
- * way speaks the Pico's own frames (GB-Link GBLink-Firmware 2.2.7: serialLayer, gb.cpp, control.hpp). */
+ * way speaks the Pico's own frames (GB-Link GBLink-Firmware 2.2.7: serialLayer, gb.cpp, control.hpp). Firmware 1.8 on, the Pico's job
+ * can also be this board's own: a link port wired to its GPIOs (linkport.h), the same clock with the bytes shifted here. */
 enum front { FRONT_XFER, FRONT_PICO };
 static uint8_t s_front;
 static struct UDSClock s_clock;
@@ -146,7 +148,12 @@ static struct UDSClock s_clock;
 #define PICO_UART UART_NUM_1
 #define PICO_UART_BAUD 921600
 #define PICO_PROBE_US 1000000
-static bool s_pico_uart;     /* the running wrapper's Pico is on the UART */
+enum pico_at {
+    PICO_AT_HOST, /* the host stands in for it, inside GB_PICO */
+    PICO_AT_UART, /* a GB-Link on the UART */
+    PICO_AT_PORT, /* no Pico: the link port on this board's GPIOs (CONFIG_UDS_LINK_PORT) */
+};
+static uint8_t s_pico_at;    /* where the running wrapper's Pico is */
 static bool s_uart_ok;       /* the UART is set up (CONFIG_UDS_PICO_LINK) */
 static bool s_feeding_uart;  /* pico_frame: the frame came from the UART */
 static int64_t s_probe_us;
@@ -602,15 +609,15 @@ static void pico_send_to(bool uart, uint8_t channel, const uint8_t *payload, siz
 
 static void pico_send(uint8_t channel, const uint8_t *payload, size_t length)
 {
-    pico_send_to(s_pico_uart, channel, payload, length);
+    if (s_pico_at != PICO_AT_PORT) pico_send_to(s_pico_at == PICO_AT_UART, channel, payload, length);
 }
 
-static int32_t start_standalone(void);
+static int32_t start_standalone(enum pico_at at);
 
-/* The board may start on its own: the UART is set up, no host has claimed the board and the 3DS key is stored. */
+/* The board may start on its own: a UART or a link port is set up, no host has claimed the board and the 3DS key is stored. */
 static bool standalone_allowed(void)
 {
-    return s_uart_ok && !s_host_claimed && keys_present(UDS_KEY_SLOT_DATA);
+    return (s_uart_ok || linkport_enabled()) && !s_host_claimed && keys_present(UDS_KEY_SLOT_DATA);
 }
 
 static int64_t gap_us(enum UDSClockGap gap)
@@ -648,8 +655,8 @@ static void pico_frame(uint8_t channel, const uint8_t *payload, size_t length)
         /* Nothing runs: only a Pico on the UART answering the board's own SetMode starts the wrapper. */
         const bool mode_active = channel == PICO_CHANNEL_STATUS && length >= 2 &&
                                  (uint16_t)(payload[0] | (payload[1] << 8)) == PICO_STATUS_GB_MODE_ACTIVE;
-        if (!s_feeding_uart || !mode_active || !standalone_allowed() || start_standalone() != ESP_OK) return;
-    } else if (s_front != FRONT_PICO || s_feeding_uart != s_pico_uart) {
+        if (!s_feeding_uart || !mode_active || !s_uart_ok || !standalone_allowed() || start_standalone(PICO_AT_UART) != ESP_OK) return;
+    } else if (s_front != FRONT_PICO || s_pico_at != (s_feeding_uart ? PICO_AT_UART : PICO_AT_HOST)) {
         return; /* a frame from the other transport than the running wrapper's Pico */
     }
     if (channel == PICO_CHANNEL_STATUS && length >= 2) {
@@ -771,6 +778,76 @@ static void pico_poll(void)
     s_pico.sent_us = now_us;
 }
 
+/* The link port on this board's GPIOs (linkport.h) in the Pico's place: the same clock, each byte shifted here and its reply there at
+ * once, so a round trip is the byte's own millisecond. Before each byte the clock line is watched for one bit: a cartridge that clocks
+ * a byte itself (choosing roles, it may try to be the master) is left to finish. A line low for longer is stuck (nothing on the port,
+ * or a console switched off) and is clocked anyway: open drain, nothing fights. With a sense pin the port's VCC is watched too: no
+ * console, or a GBA game (3.3 V), and nothing is clocked; on its own the board stops when the console has been gone a while. */
+#define PORT_BUSY_STUCK_US 20000
+#define PORT_POWER_EVERY_US 250000
+#define PORT_POWER_GONE_US 3000000
+
+static struct {
+    int64_t busy_since_us;  /* the clock line was found low (0: it was not) */
+    unsigned busy, stuck;   /* bytes of the other side's own waited for; lines stuck low clocked anyway */
+    int64_t power_us;       /* when the VCC was last read */
+    int64_t power_lost_us;  /* since when no Game Boy has been there (0: one is) */
+    uint8_t power;          /* enum linkport_power, last read */
+} s_port;
+
+static const char *power_text(enum linkport_power power)
+{
+    switch (power) {
+    case LINKPORT_POWER_OFF: return "nothing there (or the console is off)";
+    case LINKPORT_POWER_GBA: return "a GBA game (3.3 V): not clocking";
+    case LINKPORT_POWER_GB: return "a Game Boy (5 V)";
+    case LINKPORT_POWER_UNKNOWN:
+    default: return "no sense pin: taken as a Game Boy";
+    }
+}
+
+/* Reads the port's VCC now and then. True while a Game Boy (or, with no sense pin, presumably one) is on the port. */
+static bool port_watch_power(int64_t now_us)
+{
+    if (!s_port.power_us || now_us - s_port.power_us >= PORT_POWER_EVERY_US) {
+        s_port.power_us = now_us;
+        uint32_t mv;
+        const enum linkport_power power = linkport_power(&mv);
+        if (power != s_port.power) {
+            s_port.power = (uint8_t)power;
+            logf_host("port: %s (%lu mV)", power_text(power), (unsigned long)mv);
+        }
+    }
+    const bool present = s_port.power == LINKPORT_POWER_GB || s_port.power == LINKPORT_POWER_UNKNOWN;
+    if (present) {
+        s_port.power_lost_us = 0;
+    } else if (!s_port.power_lost_us) {
+        s_port.power_lost_us = now_us;
+    }
+    return present;
+}
+
+static void port_poll(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    if (!port_watch_power(now_us)) return;
+    if (s_wire.phase == UDS_WIRE_DOWN || now_us < s_pico.next_us) return;
+    if (linkport_clock_busy()) {
+        if (!s_port.busy_since_us) {
+            s_port.busy_since_us = now_us;
+            ++s_port.busy;
+        }
+        if (now_us - s_port.busy_since_us < PORT_BUSY_STUCK_US) return;
+        ++s_port.stuck;
+    }
+    s_port.busy_since_us = 0;
+    s_pico.gap = udsClockGap(&s_clock);
+    uint8_t byte;
+    if (!udsClockPrepare(&s_clock, s_now, &byte)) return; /* the mail hold: look again on the next pass */
+    s_pico.sent_us = esp_timer_get_time();
+    pico_exchanged(linkport_exchange(byte));
+}
+
 /* The task --------------------------------------------------------------------------------------------------------------- */
 
 static uint8_t stage(void)
@@ -834,7 +911,14 @@ static void report_state(void)
         for (int i = 0; i < 10; ++i)
             for (int b = 0; b < 4; ++b) payload[i * 4 + b] = (uint8_t)(values[i] >> (8 * b));
         s_send(UDS_EVT_GB_STATS, 0, payload, sizeof(payload));
-        if (s_front == FRONT_PICO) {
+        if (s_front == FRONT_PICO && s_pico_at == PICO_AT_PORT) {
+            logf_host("clock (link port): %u exchanges to the wire, %u kept from it; %lu bytes in 5 s, %u times the other side was "
+                      "clocking, %u times the clock line stuck low",
+                      s_clock.exchanges, s_clock.quiet, (unsigned long)s_pico.round_trips, s_port.busy, s_port.stuck);
+            s_pico.round_trips = 0;
+            s_pico.round_trip_sum_us = 0;
+            s_pico.round_trip_max_us = 0;
+        } else if (s_front == FRONT_PICO) {
             logf_host("clock (Pico): %u exchanges to the wire, %u kept from it; %u bytes with no reply, %u replies with no byte out; "
                       "%lu bytes in 5 s, round trip %lu us on average, %lu at most",
                       s_clock.exchanges, s_clock.quiet, s_pico.timeouts, s_pico.stray_replies, (unsigned long)s_pico.round_trips,
@@ -873,7 +957,13 @@ static bool service(void)
     air_poll();
     joiner_poll();
     udsWirePoll(&s_wire, s_now);
-    if (s_front == FRONT_PICO) pico_poll();
+    if (s_front == FRONT_PICO) {
+        if (s_pico_at == PICO_AT_PORT) {
+            port_poll();
+        } else {
+            pico_poll();
+        }
+    }
     report_state();
     const uint32_t pass_us = (uint32_t)(esp_timer_get_time() - start);
     if (pass_us > s_timing.max_pass_us) s_timing.max_pass_us = pass_us;
@@ -894,7 +984,9 @@ static bool service(void)
 static void stop_wrapper(void)
 {
     if (!s_active) return;
-    if (s_front == FRONT_PICO && s_pico.running) {
+    if (s_front == FRONT_PICO && s_pico_at == PICO_AT_PORT) {
+        linkport_release();
+    } else if (s_front == FRONT_PICO && s_pico.running) {
         const uint8_t cancel[1] = {PICO_CMD_CANCEL};
         pico_send(PICO_CHANNEL_COMMAND, cancel, sizeof(cancel));
     }
@@ -911,8 +1003,9 @@ static void stop_wrapper(void)
 }
 
 /* Starts the wrapper for `game` (kCartridge: the generation is detected). `host`: started by a host's GB_START, which gets the state
- * and stats. `pico`: the cartridge is behind a Pico and this board clocks it, on the UART (`uart`) or through the host. */
-static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, bool pico, bool uart, const uint16_t name[UDS_NAME_WORDS])
+ * and stats. `pico`: this board clocks the cartridge, behind a Pico that is `at` the host or the UART, or on its own link port. */
+static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, bool pico, enum pico_at at,
+                             const uint16_t name[UDS_NAME_WORDS])
 {
     s_game = game;
     memset(&s_air, 0, sizeof(s_air));
@@ -958,8 +1051,10 @@ static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, 
     udsWireSetGeneration(&s_wire, game == &kCartridge ? 0 : game->gen2 ? 2 : 1);
     udsWireSetCartEcho(&s_wire, true); /* a menu the cartridge chose first reaches the 3DS (uds-wire.h) */
     s_front = pico ? FRONT_PICO : FRONT_XFER;
-    s_pico_uart = pico && uart;
+    s_pico_at = pico ? (uint8_t)at : PICO_AT_HOST;
     memset(&s_pico, 0, sizeof(s_pico));
+    memset(&s_port, 0, sizeof(s_port));
+    s_port.power = 0xFF; /* the first reading is logged */
     udsClockInit(&s_clock, &s_wire, true, UDS_CLOCK_MAIL_HOLD_AHEAD);
     if (s_trace) udsClockSetTrace(&s_clock, clock_trace, NULL);
     s_exchanges = 0;
@@ -968,25 +1063,29 @@ static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, 
     memset(s_reported, 0xFF, sizeof(s_reported));
     s_last_stats_ms = 0;
     s_active = true;
+    const char *where = s_front != FRONT_PICO          ? ""
+                        : s_pico_at == PICO_AT_PORT ? ", on this board's link port: this board drives the clock"
+                                                    : ", behind a Pico: this board drives the clock";
     if (game == &kCartridge) {
-        logf_host("wrapper started for a cartridge whose generation its first sync will tell%s",
-                  s_front == FRONT_PICO ? ", behind a Pico: this board drives the clock" : "");
+        logf_host("wrapper started for a cartridge whose generation its first sync will tell%s", where);
     } else {
-        logf_host("wrapper started for %s (Gen %d)%s", game->title, game->gen2 ? 2 : 1,
-                  s_front == FRONT_PICO ? ", the cartridge behind a Pico: this board drives the clock" : "");
+        logf_host("wrapper started for %s (Gen %d)%s", game->title, game->gen2 ? 2 : 1, where);
     }
     return ESP_OK;
 }
 
-/* GB_START {flags:u8 (bit 0: send the wrapper's log, bit 1: Pico, bit 2: detect the generation), title[16] (the cartridge header's,
- * 0x134), name[20] (UTF-16LE, 10 words)}. A wrapper the board started on its own gives way. */
+/* GB_START {flags:u8 (bit 0: send the wrapper's log, bit 1: Pico, bit 2: detect the generation, bit 3: the link port), title[16] (the
+ * cartridge header's, 0x134), name[20] (UTF-16LE, 10 words)}. A wrapper the board started on its own gives way. */
 static int32_t start_wrapper(const struct request *request)
 {
     stop_wrapper();
     if (request->length < 1 + 16) return ESP_ERR_INVALID_SIZE;
     const uint8_t flags = request->data[0];
+    const bool port = flags & UDS_GB_START_PORT;
+    if (port && !linkport_enabled()) return ESP_ERR_INVALID_STATE; /* built without CONFIG_UDS_LINK_PORT */
+    const bool pico = port || (flags & UDS_GB_START_PICO);
     const struct gb_game *game = NULL;
-    if ((flags & UDS_GB_START_PICO) && (flags & UDS_GB_START_DETECT)) {
+    if (pico && (flags & UDS_GB_START_DETECT)) {
         game = &kCartridge;
     } else {
         char title[TITLE_KEY + 1] = {0};
@@ -1005,14 +1104,34 @@ static int32_t start_wrapper(const struct request *request)
         for (int i = 0; i < UDS_NAME_WORDS; ++i) name[i] = (uint16_t)(request->data[17 + 2 * i] | (request->data[18 + 2 * i] << 8));
     }
     s_host_claimed = true;
-    return begin_wrapper(game, true, flags & UDS_GB_START_LOG, flags & UDS_GB_START_PICO, false, name);
+    return begin_wrapper(game, true, flags & UDS_GB_START_LOG, pico, port ? PICO_AT_PORT : PICO_AT_HOST, name);
 }
 
-/* A Pico on the UART answered the board's SetMode, with no host: the wrapper runs on its own, for a cartridge whose generation its
- * first sync will tell. Nothing is logged or reported (nobody is listening); the screen shows where it is. */
-static int32_t start_standalone(void)
+/* A Pico on the UART answered the board's SetMode, or a Game Boy is on the link port, with no host: the wrapper runs on its own, for a
+ * cartridge whose generation its first sync will tell. Nothing is logged or reported (nobody is listening); the screen shows where it
+ * is. */
+static int32_t start_standalone(enum pico_at at)
 {
-    return begin_wrapper(&kCartridge, false, false, true, true, kStandaloneName);
+    return begin_wrapper(&kCartridge, false, false, true, at, kStandaloneName);
+}
+
+/* With nothing running and the board free to start on its own: a link port with a Game Boy on it (or no sense pin to say otherwise)
+ * starts the wrapper. */
+static void probe_port(void)
+{
+    if (!linkport_enabled()) return;
+    const enum linkport_power power = linkport_power(NULL);
+    if (power == LINKPORT_POWER_GB || power == LINKPORT_POWER_UNKNOWN) start_standalone(PICO_AT_PORT);
+}
+
+/* On its own, on the link port: a console gone for a while (switched off, unplugged, or a GBA game now) stops the wrapper, and the
+ * radio with it; probe_port starts it again when a Game Boy is back. */
+static void watch_standalone_port(void)
+{
+    if (s_active && !s_host && s_front == FRONT_PICO && s_pico_at == PICO_AT_PORT && s_port.power_lost_us &&
+        esp_timer_get_time() - s_port.power_lost_us >= PORT_POWER_GONE_US) {
+        stop_wrapper();
+    }
 }
 
 /* GB_XFER {master:u8}: the cartridge clocked a transfer out. The answer is the byte the slave shifts back in that same transfer. */
@@ -1073,7 +1192,11 @@ static void gbwrap_task(void *arg)
         bool got = xQueueReceive(s_queue, &request, wait) == pdTRUE;
         more = s_active && service();
         if (got) handle(&request);
-        if (may_start && !s_active) probe_pico();
+        watch_standalone_port();
+        if (may_start && !s_active) {
+            if (s_uart_ok) probe_pico();
+            probe_port();
+        }
     }
 }
 
@@ -1119,6 +1242,7 @@ void gbwrap_init(gbwrap_send_t send)
     s_queue = xQueueCreate(QUEUE_LENGTH, sizeof(struct request));
     s_rx_ring = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
     uart_init();
+    linkport_init(); /* does nothing without CONFIG_UDS_LINK_PORT */
     xTaskCreate(gbwrap_task, "gbwrap", TASK_STACK, NULL, TASK_PRIORITY, NULL);
 }
 

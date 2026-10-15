@@ -108,12 +108,19 @@ bool udsEsp32DecoderFeed(struct UDSEsp32Decoder* decoder, uint8_t byte, struct U
 
 // The board ----------------------------------------------------------------------------------------------------------------------
 
+// The HelloAck's features (firmware 1.8 on; older firmware has none): what the board's firmware was built with.
+enum {
+	UDS_ESP32_FEATURE_LINK_PORT = 0x01, // the console's link port on the board's GPIOs: the VC-Adapter board profile
+	UDS_ESP32_FEATURE_PICO_UART = 0x02, // a GB-Link wired to the board's UART
+};
+
 struct UDSEsp32Info {
 	bool valid; // a HelloAck has arrived
 	uint8_t proto;
 	uint8_t major;
 	uint8_t minor;
 	uint8_t factoryMac[6];
+	uint8_t features; // UDS_ESP32_FEATURE_*
 };
 
 struct UDSEsp32Rx {
@@ -189,8 +196,10 @@ bool udsEsp32Ping(struct UDSEsp32* esp, uint32_t token);
 bool udsEsp32HasGbWrapper(const struct UDSEsp32* esp); // the HelloAck says 1.4 or later
 // The HelloAck says 1.6 or later: the wrapper can drive the clock of a cartridge behind a GB-Link Pico (udsEsp32GbStart's `pico`).
 bool udsEsp32HasGbPico(const struct UDSEsp32* esp);
-// The HelloAck says 1.8 or later: the board may have a link port of its own (udsEsp32GbStartPort; built with CONFIG_UDS_LINK_PORT).
+// The board's firmware is the VC-Adapter board build: it has a link port of its own (udsEsp32GbStartPort; CONFIG_UDS_LINK_PORT).
 bool udsEsp32HasGbPort(const struct UDSEsp32* esp);
+// Which build the board runs, for messages: "VC-Adapter board build" or "GB-Link build" (with " + GB-Link UART" when it has one).
+const char* udsEsp32BuildText(const struct UDSEsp32* esp);
 // Stores a key in the board's flash (the board never sends it back). True when the board says it is stored.
 bool udsEsp32SetKey(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs);
 // Whether the board holds the UDS data key. -1: no answer.

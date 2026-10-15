@@ -17,6 +17,10 @@
  * (MGBA_VCLINK_GEN=auto). Optional and off by default (CONFIG_UDS_PICO_LINK): a GB-Link wired to the UART, with which the board
  * starts on its own when there is no host; a host's HELLO takes the board back.
  *
+ * Firmware 1.8 adds the link port (CONFIG_UDS_LINK_PORT, linkport.h): no GB-Link at all, a GBA/GBC link port wired to this board's
+ * GPIOs through a level shifter, the board clocking it as the Pico would. It starts on its own as with a GB-Link on the UART, or from
+ * a host's GB_START with UDS_GB_START_PORT (mGBA's uds-gblink-relay --port), which gets the log.
+ *
  * Everything between is the wrapper mGBA ran on the PC (src/gb/sio in the mgba_LDN repository), copied unchanged into gbwrap/: the
  * permanent slave (uds-wire.c, uds-cable.c), the Pia session (uds-session.c, uds-pia.c), the join (uds-room.c) and CCMP (uds-ccmp.c).
  * gbwrap.c holds what took the PC's place: the join on this board's radio and the task that runs it all. The 3DS key it needs is the

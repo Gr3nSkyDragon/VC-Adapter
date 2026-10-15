@@ -46,9 +46,14 @@
 #define UDS_GB_START_LOG 0x01
 #define UDS_GB_START_PICO 0x02
 #define UDS_GB_START_DETECT 0x04 /* 1.7 on, with PICO: the title is not used; the cartridge's first sync tells its generation */
+#define UDS_GB_START_PORT 0x08   /* 1.8 on: the cartridge is on this board's own link port (CONFIG_UDS_LINK_PORT), clocked as PICO */
 
 /* Device -> host. */
-#define UDS_EVT_HELLO_ACK 0x81 /* {proto:u8, fw_major:u8, fw_minor:u8, factory_mac[6]} */
+#define UDS_EVT_HELLO_ACK 0x81 /* {proto:u8, fw_major:u8, fw_minor:u8, factory_mac[6]}, 1.8 on + {features:u8} */
+/* HELLO_ACK's features (1.8 on; older firmware sends 9 bytes, which means none): what this build was made with. The VC-Adapter
+ * board profile has LINK_PORT, the GB-Link profile neither. */
+#define UDS_HELLO_FEATURE_LINK_PORT 0x01 /* CONFIG_UDS_LINK_PORT: the console's link port on this board's GPIOs */
+#define UDS_HELLO_FEATURE_PICO_UART 0x02 /* CONFIG_UDS_PICO_LINK: a GB-Link wired to this board's UART */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */
 #define UDS_EVT_LOG 0x84       /* {text...} */

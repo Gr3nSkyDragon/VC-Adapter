@@ -47,19 +47,71 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
   --size 48` for colour Pokemon sprites; it prints each picture in the terminal, and `--preview
   out.png` writes it enlarged.
 
+### GBA link port, no GB-Link (firmware 1.8)
+
+The **VC-Adapter board build** (`esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
+`CONFIG_UDS_LINK_PORT`, menuconfig's UDS bridge > **Game Boy link port wired to GPIOs**) needs no GB-Link: a GBA (playing a GB/GBC cartridge), GBC or Game Boy link port is wired to four GPIOs through a level
+shifter, and the board clocks the cartridge itself, as the GB-Link's Pico did (8192 Hz, the board the master, the cartridge the
+slave; `main/linkport.c`). **Not yet run on hardware.**
+
+The port's signals are **5 V when a GBA runs a GB/GBC cartridge** (3.3 V for a GBA game). The ESP32's pins take 3.3 V only, so
+a level shifter is required: a 4-channel BSS138 module (the common "I2C-safe bidirectional logic level converter"). Power its
+high side from the port's own VCC (pin 1), so that it follows the console, and its low side from the board's 3V3. Never connect
+pin 1 to the board's 5V or 3V3 pin, and never power the board from the port.
+
+The defaults are the pinout shared with the GB-Link side of the unified board. Its signal names follow the GB-Link's notation:
+**SI and SO are the adapter's**, not the console's, so the adapter's SI carries the console's SO and the adapter's SO carries the
+console's SI.
+
+| Adapter signal | Link port pin (console's name) | Level shifter | XIAO ESP32-S3 | GPIO (Kconfig default) |
+| --- | --- | --- | --- | --- |
+| SC (clock) | 5 (SC) | one channel | D0 | GPIO1 (`UDS_LINK_PORT_SC_GPIO`) |
+| SI (adapter in) | 2 (SO, the console's output) | one channel | D1 | GPIO2 (`UDS_LINK_PORT_SI_GPIO`) |
+| SO (adapter out) | 3 (SI, the console's input) | one channel | D2 | GPIO3 (`UDS_LINK_PORT_SO_GPIO`) |
+| SD | 4 (SD) | one channel | D3 | GPIO4 (`UDS_LINK_PORT_SD_GPIO`; unused in a Game Boy's link, held as an input) |
+| — | 1 (VCC, 5 V in GB mode) | HV supply | — | (optional: 100k/100k divider to D4 = GPIO5, `..._SENSE_GPIO`) |
+| 3V3 | — | LV supply | 3V3 | — |
+| GND | 6 (GND) | GND (both sides) | GND | — |
+
+The port pin numbers are for a **plug that goes straight into the console** (its pin 2 is the console's SO). A **socket** on the
+board with a link cable to the console is the other way round, because the cable crosses SO and SI: socket pin 3 goes to the
+adapter's SI (D1) and pin 2 to its SO (D2), or swap the two GPIOs in menuconfig. Use a cable that carries GB/GBC games (a
+GBC-type or universal cable).
+
+**The sense divider (optional).** Two equal resistors (100 kΩ each) in series from the port's VCC (pin 1, the same net that
+powers the shifter's HV side) to GND, with the point between them wired to an ADC pin (D4 = GPIO5 is free with the shared pinout;
+set `CONFIG_UDS_LINK_PORT_SENSE_GPIO=5`). The divider halves the port's voltage into the ESP32's range (5 V reads 2.5 V), so
+the board can tell nothing / a GBA game (3.3 V) / a Game Boy game (5 V) apart: it starts the wrapper on its own only for a Game
+Boy game and stops 3 s after the console goes off. A 100 nF capacitor from the middle point to GND steadies the reading. Without
+the divider (`-1`, the default) the board assumes a Game Boy game is there.
+
+The defaults share GPIO1 and GPIO2 with the GB-Link UART mode's (`CONFIG_UDS_PICO_LINK`, taken from GB-Link's own ESP32 firmware);
+a build with both turned on stops with an error until one of them is moved.
+
+The pins are open drain (the shifter's pull-ups make the high level), so a cartridge clocking a byte of its own never fights a
+driven high; before each byte the board watches the clock for one bit and lets such a byte finish. A 330 Ω resistor in series
+with SC on the port side is cheap insurance all the same.
+
+With the 3DS key stored and no host on USB, the board runs the wrapper on its own (as with a GB-Link on the UART); with the
+optional sense divider it waits for a Game Boy's 5 V and stops when the console has been off for 3 s. To watch it from a PC,
+`uds-gblink-relay --port [--trace <file>]` (this repository's `tools/`) says HELLO, which takes the board back, and starts the wrapper with
+its log.
+
 ## Flashing a pre-built firmware (no ESP-IDF needed)
 
-Each release ships one file, `esp32-uds-bridge-fw<version>-esp32s3.bin` (bootloader, partition table
-and app merged). It is written at **offset `0x0`**, gaps included, so it also **erases the stored 3DS key**:
-store the key again after flashing. Plug the board in through its **native USB port** (the one that
-shows up as an Espressif USB Serial/JTAG device) and use one of these:
+Each release ships one file per build (bootloader, partition table and app merged):
+`esp32-uds-bridge-fw<version>-esp32s3-gblink.bin` for a board on the PC's or phone's USB (Azahar, mGBA, a GB-Link through
+uds-gblink-relay), and `esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin` for the VC-Adapter board on the console's link port.
+Images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build. Either file is written at
+**offset `0x0`**, gaps included, so it also **erases the stored 3DS key**: store the key again after flashing. Plug the board
+in through its **native USB port** (the one that shows up as an Espressif USB Serial/JTAG device) and use one of these:
 
 **With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It
 flashes the firmware and then stores the 3DS key from your `aes_keys.txt` in one go (either step can
-be done on its own): pick the firmware (the newest `.bin` beside it is filled in), your `aes_keys.txt`
-and the board, and press Start. Only the one 16-byte key the board needs (slot 0x2D) is sent to it,
-and it is never shown or logged. It is built from mGBA-LDN's sources (`src/gb/sio/uds-esp32-setup.c`,
-target `uds-esp32-setup`) and needs nothing else installed.
+be done on its own): pick **Build for** (GB-Link or VC-Adapter board; the newest `.bin` of that build beside it is filled
+in, and it asks before flashing an image of the other build), your `aes_keys.txt` and the board, and press Start. Only the one
+16-byte key the board needs (slot 0x2D) is sent to it, and it is never shown or logged. It is built from this repository's
+`tools/` and needs nothing else installed.
 
 **In the browser (nothing to install).** Open Espressif's [esptool-js](https://espressif.github.io/esptool-js/)
 in Chrome or Edge (it needs Web Serial). Connect, pick the board's port, add the `.bin` at address
@@ -78,7 +130,10 @@ If the board is not detected, hold **BOOT** while plugging it in, then release i
 nothing after flashing; in Azahar's Network settings, **Connect** should report the firmware version.
 The merged file was verified by flashing it to a real ESP32-S3 with esptool and with esptool-js.
 
-To produce the merged file for a new release, run `package-release-bin.ps1` from an ESP-IDF PowerShell.
+To produce the merged files for a new release, run `package-release-bin.ps1` from an ESP-IDF PowerShell: it builds both
+(`-Board gblink` or `-Board vcadapter` for one), each in its own `build-<board>` folder, and writes them to the repository's
+`release/`. The build's name is also in the app's version (`1.8-vcadapter`), which uds-esp32-setup reads, and the firmware says
+it in HELLO_ACK's features byte (1.8 on).
 
 ## Build and flash
 
@@ -89,6 +144,13 @@ cd firmware/esp32-uds-bridge
 idf.py set-target esp32s3
 idf.py build
 idf.py -p COMx flash        # COMx = the board's port on your PC
+```
+
+That builds the GB-Link build (`sdkconfig.defaults`). The VC-Adapter board build, in a folder of its own:
+
+```
+idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.vcadapter" build
+idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -p COMx flash
 ```
 
 Flash it over the same native USB port (hold BOOT while plugging in if the port is not detected).
@@ -136,7 +198,7 @@ runs, the raw radio commands are refused (`ESP_ERR_INVALID_STATE`) and received 
 | `0x0A` SET_KEY | `slot:u8 (0x2D), key[16]` | STATUS. Stored in flash (NVS), never sent back. `idf.py flash` leaves it; a release image written at 0x0 erases it |
 | `0x0B` KEY_STATUS | none | `0x88` KEY_INFO `{slot, present}` |
 | `0x0C` ERASE_KEYS | none | STATUS |
-| `0x10` GB_START | `flags:u8 (bit 0: log, bit 1: Pico, bit 2: detect the generation), title[16] (cartridge header at 0x134), name[20] (UTF-16LE)` | STATUS: 0, `0x105` no key stored, `0x106` unknown game |
+| `0x10` GB_START | `flags:u8 (bit 0: log, bit 1: Pico, bit 2: detect the generation, bit 3 (1.8): the board's own link port), title[16] (cartridge header at 0x134), name[20] (UTF-16LE)` | STATUS: 0, `0x105` no key stored, `0x106` unknown game, `0x103` no link port built in |
 | `0x11` GB_XFER | `master:u8`, the byte the cartridge clocked out | `0x91` GB_REPLY `{slave:u8, wire phase:u8}`, the byte shifted back in the same transfer |
 | `0x12` GB_STOP | none | STATUS (STOP does the same while the wrapper runs) |
 | `0x13` GB_PICO | a frame of the GB-Link Pico's protocol, from the Pico (1.6) | none |

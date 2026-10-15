@@ -21,8 +21,20 @@
 #include "uds_wire.h"
 
 #define FW_MAJOR 1
-#define FW_MINOR 7
+#define FW_MINOR 8
 #define PROTOCOL_VERSION UDS_WIRE_VERSION
+
+/* What this build was made with, for HELLO_ACK: the VC-Adapter board profile has the link port, the GB-Link profile neither. */
+#if CONFIG_UDS_LINK_PORT
+#define FEATURE_LINK_PORT UDS_HELLO_FEATURE_LINK_PORT
+#else
+#define FEATURE_LINK_PORT 0
+#endif
+#if CONFIG_UDS_PICO_LINK
+#define FEATURE_PICO_UART UDS_HELLO_FEATURE_PICO_UART
+#else
+#define FEATURE_PICO_UART 0
+#endif
 #define RX_RING_BYTES (48 * 1024)
 #define STATS_INTERVAL_US (5 * 1000 * 1000)
 
@@ -186,8 +198,9 @@ static void handle_command(uds_wire_frame_t *frame)
         s_host_seen = true;
         gbwrap_host_hello(); /* a wrapper the board started on its own (a GB-Link on the UART) gives the board to the host */
         display_wake();
-        uint8_t payload[9] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
+        uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
+        payload[9] = FEATURE_LINK_PORT | FEATURE_PICO_UART;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }

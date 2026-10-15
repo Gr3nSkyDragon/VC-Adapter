@@ -228,6 +228,7 @@ static void _dispatch(struct UDSEsp32* esp, const struct UDSEsp32Frame* frame) {
 			esp->info.major = p[1];
 			esp->info.minor = p[2];
 			memcpy(esp->info.factoryMac, &p[3], 6);
+			esp->info.features = frame->length >= 10 ? p[9] : 0;
 		}
 		break;
 	case UDS_ESP32_EVT_KEY_INFO:
@@ -416,7 +417,14 @@ bool udsEsp32HasGbPico(const struct UDSEsp32* esp) {
 }
 
 bool udsEsp32HasGbPort(const struct UDSEsp32* esp) {
-	return esp->info.valid && (esp->info.major > 1 || (esp->info.major == 1 && esp->info.minor >= 8));
+	return esp->info.valid && (esp->info.features & UDS_ESP32_FEATURE_LINK_PORT);
+}
+
+const char* udsEsp32BuildText(const struct UDSEsp32* esp) {
+	const bool port = esp->info.features & UDS_ESP32_FEATURE_LINK_PORT;
+	const bool uart = esp->info.features & UDS_ESP32_FEATURE_PICO_UART;
+	return port ? (uart ? "VC-Adapter board build + GB-Link UART" : "VC-Adapter board build")
+	            : (uart ? "GB-Link build + GB-Link UART" : "GB-Link build");
 }
 
 // Polls until *flag is set or the time is up. The board answers within a few milliseconds over USB, so this spins rather than sleeping

@@ -4,10 +4,15 @@
 
 /*
  * uds-esp32-setup: sets up an ESP32-S3 board for Game Boy Virtual Console trades with a 3DS, with no Python, ESP-IDF or mGBA. It
- * flashes a release image of Azahar's esp32-uds-bridge firmware (uds-esp32-flash.c) and stores the 3DS UDS key from the user's
+ * flashes a release image of the esp32-uds-bridge firmware (uds-esp32-flash.c) and stores the 3DS UDS key from the user's
  * aes_keys.txt on the board (the same request as uds-esp32-probe --store-key; only the one 16-byte key leaves the PC, and it is never
  * shown or logged). Either step can be done on its own. Flashing writes the whole image, which erases the key store, so with both
  * ticked the key is stored after the flash.
+ *
+ * The firmware comes in two builds (package-release-bin.ps1): the GB-Link build, for a board on the PC's USB with a GB-Link, and the
+ * VC-Adapter board build, for a board wired to the console's link port. The "Build for" choice picks the newest image of that build
+ * next to this program; an image's build is read from its version (1.8-vcadapter), and an image from before the split counts as the
+ * GB-Link build.
  *
  * Windows only (Win32, no other dependencies). Build target: uds-esp32-setup.
  */
@@ -40,6 +45,9 @@ enum {
 	ID_FW_EDIT,
 	ID_FW_BROWSE,
 	ID_FW_INFO,
+	ID_BUILD_LABEL,
+	ID_BUILD_GBLINK,
+	ID_BUILD_VCADAPTER,
 	ID_KEY_CHECK,
 	ID_KEY_EDIT,
 	ID_KEY_BROWSE,
@@ -75,6 +83,28 @@ struct Job {
 
 static int _px(int value) {
 	return MulDiv(value, sDpi, 96);
+}
+
+enum Build {
+	BUILD_UNKNOWN,
+	BUILD_GBLINK,
+	BUILD_VCADAPTER,
+};
+
+static const char* _buildName(enum Build build) {
+	return build == BUILD_VCADAPTER ? "VC-Adapter board build" : build == BUILD_GBLINK ? "GB-Link build" : "build not marked";
+}
+
+// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "1.8-vcadapter"). Unmarked: from before the
+// split, or built by hand with idf.py.
+static enum Build _imageBuild(const struct UDSFlashImageInfo* info) {
+	if (strstr(info->version, "-vcadapter")) {
+		return BUILD_VCADAPTER;
+	}
+	if (strstr(info->version, "-gblink")) {
+		return BUILD_GBLINK;
+	}
+	return BUILD_UNKNOWN;
 }
 
 static HWND _item(int id) {
@@ -184,8 +214,8 @@ static DWORD WINAPI _work(LPVOID param) {
 			summary = "That firmware file cannot be flashed. Nothing was changed on the board.";
 			goto done;
 		}
-		_log("Firmware: %s %s, built %s %s (%u KB)", info.project[0] ? info.project : "(unnamed)", info.version, info.date, info.time,
-		     (unsigned) ((size + 1023) / 1024));
+		_log("Firmware: %s %s (%s), built %s %s (%u KB)", info.project[0] ? info.project : "(unnamed)", info.version,
+		     _buildName(_imageBuild(&info)), info.date, info.time, (unsigned) ((size + 1023) / 1024));
 
 		struct UDSFlashPort* port = udsFlashOpenPort(job->port);
 		if (!port) {
@@ -236,7 +266,7 @@ static DWORD WINAPI _work(LPVOID param) {
 			summary = "The board's firmware did not answer (see the log).";
 			goto done;
 		}
-		_log("Firmware %u.%u is running (protocol %u)", esp.info.major, esp.info.minor, esp.info.proto);
+		_log("Firmware %u.%u is running (protocol %u, %s)", esp.info.major, esp.info.minor, esp.info.proto, udsEsp32BuildText(&esp));
 		if (job->key) {
 			if (!udsEsp32HasGbWrapper(&esp)) {
 				udsEsp32Close(&esp);
@@ -319,7 +349,8 @@ static void _showFirmwareInfo(void) {
 		} else if (!udsFlashCheckImage(image, size, &info, why, sizeof(why))) {
 			snprintf(text, sizeof(text), "%s", why);
 		} else {
-			snprintf(text, sizeof(text), "%s, built %s %s", info.project[0] ? info.project : "firmware", info.date, info.time);
+			snprintf(text, sizeof(text), "%s %s, %s, built %s %s", info.project[0] ? info.project : "firmware", info.version,
+			         _buildName(_imageBuild(&info)), info.date, info.time);
 		}
 		free(image);
 	}
@@ -333,6 +364,8 @@ static void _updateEnabled(void) {
 	EnableWindow(_item(ID_KEY_CHECK), !sBusy);
 	EnableWindow(_item(ID_FW_EDIT), !sBusy && flash);
 	EnableWindow(_item(ID_FW_BROWSE), !sBusy && flash);
+	EnableWindow(_item(ID_BUILD_GBLINK), !sBusy && flash);
+	EnableWindow(_item(ID_BUILD_VCADAPTER), !sBusy && flash);
 	EnableWindow(_item(ID_KEY_EDIT), !sBusy && key);
 	EnableWindow(_item(ID_KEY_BROWSE), !sBusy && key);
 	EnableWindow(_item(ID_PORT_COMBO), !sBusy);
@@ -361,6 +394,30 @@ static void _browse(int editId, const char* filter, const char* title) {
 	}
 }
 
+static enum Build _selectedBuild(void) {
+	return IsDlgButtonChecked(sWindow, ID_BUILD_VCADAPTER) == BST_CHECKED ? BUILD_VCADAPTER : BUILD_GBLINK;
+}
+
+// An image of the other build than "Build for" says is flashed only when the user says so. An unmarked image is not asked about.
+static bool _buildMatches(const char* path) {
+	size_t size = 0;
+	uint8_t* image = _readFile(path, &size);
+	struct UDSFlashImageInfo info;
+	char why[300];
+	enum Build build = image && udsFlashCheckImage(image, size, &info, why, sizeof(why)) ? _imageBuild(&info) : BUILD_UNKNOWN;
+	free(image);
+	enum Build selected = _selectedBuild();
+	if (build == BUILD_UNKNOWN || build == selected) {
+		return true;
+	}
+	char text[400];
+	snprintf(text, sizeof(text),
+	         "This image is the %s, but \"Build for\" says %s.\n\nThe GB-Link build is for a board on the PC's USB with a GB-Link; the "
+	         "VC-Adapter board build is for a board wired to the console's link port.\n\nFlash it anyway?",
+	         _buildName(build), selected == BUILD_VCADAPTER ? "VC-Adapter board" : "GB-Link");
+	return MessageBoxA(sWindow, text, TITLE, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+}
+
 static void _start(void) {
 	struct Job* job = calloc(1, sizeof(*job));
 	job->flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
@@ -372,13 +429,17 @@ static void _start(void) {
 	if (current < 0 || (size_t) current >= sPortCount) {
 		problem = "No board is selected. Plug the board in by its native USB port and press Refresh.";
 	} else if (job->flash && !job->firmware[0]) {
-		problem = "Choose the firmware file (esp32-uds-bridge-fw<version>-esp32s3.bin).";
+		problem = "Choose the firmware file (esp32-uds-bridge-fw<version>-esp32s3-<build>.bin).";
 	} else if (job->key && !job->keys[0]) {
 		problem = "Choose your aes_keys.txt.";
 	}
 	if (problem) {
 		free(job);
 		MessageBoxA(sWindow, problem, TITLE, MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+	if (job->flash && !_buildMatches(job->firmware)) {
+		free(job);
 		return;
 	}
 	snprintf(job->port, sizeof(job->port), "%s", sPorts[current].name);
@@ -410,8 +471,13 @@ static HWND _control(const char* cls, const char* text, DWORD style, int id, int
 	return hwnd;
 }
 
-// The newest esp32-uds-bridge release image next to this program, as a release folder holds them.
-static void _defaultFirmware(char* out, size_t capacity) {
+// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them. Images from before
+// the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are GB-Link builds.
+static void _defaultFirmware(enum Build build, char* out, size_t capacity) {
+	static const char* const kGbLink[] = {"esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw*-esp32s3.bin"};
+	static const char* const kVcAdapter[] = {"esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
+	const char* const* patterns = build == BUILD_VCADAPTER ? kVcAdapter : kGbLink;
+	size_t count = build == BUILD_VCADAPTER ? sizeof(kVcAdapter) / sizeof(kVcAdapter[0]) : sizeof(kGbLink) / sizeof(kGbLink[0]);
 	char dir[MAX_PATH];
 	DWORD length = GetModuleFileNameA(NULL, dir, sizeof(dir));
 	char* slash = length ? strrchr(dir, '\\') : NULL;
@@ -420,21 +486,34 @@ static void _defaultFirmware(char* out, size_t capacity) {
 		return;
 	}
 	slash[1] = 0;
-	char pattern[MAX_PATH + 40];
-	snprintf(pattern, sizeof(pattern), "%sesp32-uds-bridge-fw*-esp32s3.bin", dir);
-	WIN32_FIND_DATAA found;
-	HANDLE find = FindFirstFileA(pattern, &found);
-	if (find == INVALID_HANDLE_VALUE) {
-		return;
-	}
 	FILETIME newest = {0};
-	do {
-		if (CompareFileTime(&found.ftLastWriteTime, &newest) > 0) {
-			newest = found.ftLastWriteTime;
-			snprintf(out, capacity, "%s%s", dir, found.cFileName);
+	size_t i;
+	for (i = 0; i < count; ++i) {
+		char pattern[MAX_PATH + 48];
+		snprintf(pattern, sizeof(pattern), "%s%s", dir, patterns[i]);
+		WIN32_FIND_DATAA found;
+		HANDLE find = FindFirstFileA(pattern, &found);
+		if (find == INVALID_HANDLE_VALUE) {
+			continue;
 		}
-	} while (FindNextFileA(find, &found));
-	FindClose(find);
+		do {
+			if (CompareFileTime(&found.ftLastWriteTime, &newest) > 0) {
+				newest = found.ftLastWriteTime;
+				snprintf(out, capacity, "%s%s", dir, found.cFileName);
+			}
+		} while (FindNextFileA(find, &found));
+		FindClose(find);
+	}
+}
+
+// "Build for" changed (or the window opened): the newest image of that build next to this program, if there is one.
+static void _pickFirmware(void) {
+	char path[MAX_PATH];
+	_defaultFirmware(_selectedBuild(), path, sizeof(path));
+	if (path[0]) {
+		SetWindowTextA(_item(ID_FW_EDIT), path);
+	}
+	_showFirmwareInfo();
 }
 
 // Where Azahar (or Citra) keeps aes_keys.txt, if it is there.
@@ -460,19 +539,24 @@ static void _create(void) {
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_FW_EDIT, 30, 34, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_FW_BROWSE, 488, 33, 100, 26);
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
-	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_TABSTOP, ID_KEY_CHECK, 12, 90, 400, 20);
-	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 112, 450, 24);
-	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 111, 100, 26);
-	_control("STATIC", "Board:", SS_LEFT, ID_PORT_LABEL, 12, 152, 60, 20);
-	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 148, 408, 200);
-	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 147, 100, 26);
-	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 188, 140, 30);
-	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 194, 424, 18);
+	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
+	_control("BUTTON", "GB-Link (board on this PC's USB)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
+	_control("BUTTON", "VC-Adapter board (link port)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
+	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
+	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 142, 450, 24);
+	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 141, 100, 26);
+	_control("STATIC", "Board:", SS_LEFT, ID_PORT_LABEL, 12, 182, 60, 20);
+	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 178, 408, 200);
+	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 177, 100, 26);
+	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 218, 140, 30);
+	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 224, 424, 18);
 	SendMessageA(_item(ID_PROGRESS), PBM_SETRANGE32, 0, 1000);
-	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 228, 576, 190);
+	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 258, 576, 190);
 
 	char path[MAX_PATH];
-	_defaultFirmware(path, sizeof(path));
+	_loadSetting("build", path, sizeof(path));
+	CheckRadioButton(sWindow, ID_BUILD_GBLINK, ID_BUILD_VCADAPTER, !strcmp(path, "vcadapter") ? ID_BUILD_VCADAPTER : ID_BUILD_GBLINK);
+	_defaultFirmware(_selectedBuild(), path, sizeof(path));
 	if (!path[0]) {
 		_loadSetting("firmware", path, sizeof(path));
 	}
@@ -500,6 +584,13 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 		case ID_FW_CHECK:
 		case ID_KEY_CHECK:
 			_updateEnabled();
+			break;
+		case ID_BUILD_GBLINK:
+		case ID_BUILD_VCADAPTER:
+			if (HIWORD(wParam) == BN_CLICKED) {
+				_saveSetting("build", _selectedBuild() == BUILD_VCADAPTER ? "vcadapter" : "gblink");
+				_pickFirmware();
+			}
 			break;
 		case ID_FW_BROWSE:
 			_browse(ID_FW_EDIT, "Firmware image (*.bin)\0*.bin\0All files\0*.*\0", "Choose the esp32-uds-bridge firmware");
@@ -580,7 +671,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 	RegisterClassA(&wc);
 
 	DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-	RECT rect = {0, 0, _px(600), _px(430)};
+	RECT rect = {0, 0, _px(600), _px(460)};
 	AdjustWindowRect(&rect, style, FALSE);
 	HWND hwnd = CreateWindowExA(0, wc.lpszClassName, TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
 	                            NULL, NULL, instance, NULL);
