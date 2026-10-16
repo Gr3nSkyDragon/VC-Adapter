@@ -239,3 +239,123 @@ const char* udsKeyStatusText(enum UDSKeyStatus status) {
 	}
 	return "unknown";
 }
+
+static const char* const sProdKeyNames[UDS_PROD_KEY_COUNT] = {
+	"aes_kek_generation_source",
+	"aes_key_generation_source",
+	"master_key_00",
+	"master_key_12",
+};
+
+const char* udsProdKeyName(enum UDSProdKey key) {
+	return key < UDS_PROD_KEY_COUNT ? sProdKeyNames[key] : "?";
+}
+
+enum UDSProdKeysStatus udsProdKeysTextLoad(const char* text, size_t length, uint8_t keys[UDS_PROD_KEY_COUNT][16],
+                                           enum UDSProdKey* which) {
+	bool have[UDS_PROD_KEY_COUNT] = {false};
+	bool bad[UDS_PROD_KEY_COUNT] = {false};
+	size_t pos = 0;
+	while (pos < length) {
+		size_t end = pos;
+		while (end < length && text[end] != '\n' && text[end] != '\r') {
+			++end;
+		}
+		const char* line = &text[pos];
+		size_t size = end - pos;
+		pos = end + 1;
+		const char* equals = memchr(line, '=', size);
+		if (!equals) {
+			continue;
+		}
+		const char* name = line;
+		size_t nameLength = (size_t) (equals - line);
+		while (nameLength && isspace((unsigned char) *name)) {
+			++name;
+			--nameLength;
+		}
+		while (nameLength && isspace((unsigned char) name[nameLength - 1])) {
+			--nameLength;
+		}
+		const char* value = equals + 1;
+		size_t valueLength = size - (size_t) (value - line);
+		while (valueLength && isspace((unsigned char) *value)) {
+			++value;
+			--valueLength;
+		}
+		while (valueLength && isspace((unsigned char) value[valueLength - 1])) {
+			--valueLength;
+		}
+		size_t k;
+		for (k = 0; k < UDS_PROD_KEY_COUNT; ++k) {
+			const char* want = sProdKeyNames[k];
+			size_t wantLength = strlen(want);
+			size_t i;
+			if (nameLength != wantLength) {
+				continue;
+			}
+			for (i = 0; i < wantLength && tolower((unsigned char) name[i]) == want[i]; ++i) {
+			}
+			if (i != wantLength) {
+				continue;
+			}
+			// Exactly 32 hex digits, as GB-Link's web client wants them.
+			if (valueLength == 32 && _parseKey(value, valueLength, keys[k])) {
+				have[k] = true;
+			} else {
+				bad[k] = true;
+			}
+		}
+	}
+	size_t k;
+	for (k = 0; k < UDS_PROD_KEY_COUNT; ++k) {
+		if (!have[k]) {
+			if (which) {
+				*which = (enum UDSProdKey) k;
+			}
+			memset(keys, 0, UDS_PROD_KEY_COUNT * 16);
+			return bad[k] ? UDS_PROD_KEYS_BAD_VALUE : UDS_PROD_KEYS_MISSING;
+		}
+	}
+	return UDS_PROD_KEYS_OK;
+}
+
+enum UDSProdKeysStatus udsProdKeysLoad(const char* path, uint8_t keys[UDS_PROD_KEY_COUNT][16], enum UDSProdKey* which) {
+	if (!path || !*path) {
+		return UDS_PROD_KEYS_NO_FILE;
+	}
+	FILE* file = fopen(path, "rb");
+	if (!file) {
+		return UDS_PROD_KEYS_NO_FILE;
+	}
+	// A prod.keys is a few tens of kilobytes.
+	char* text = malloc(1 << 20);
+	if (!text) {
+		fclose(file);
+		return UDS_PROD_KEYS_NO_FILE;
+	}
+	size_t length = fread(text, 1, 1 << 20, file);
+	fclose(file);
+	enum UDSProdKeysStatus status = udsProdKeysTextLoad(text, length, keys, which);
+	memset(text, 0, length);
+	free(text);
+	return status;
+}
+
+void udsProdKeysStatusText(enum UDSProdKeysStatus status, enum UDSProdKey which, char* out, size_t capacity) {
+	switch (status) {
+	case UDS_PROD_KEYS_OK:
+		snprintf(out, capacity, "the four Switch keys are in the file");
+		return;
+	case UDS_PROD_KEYS_NO_FILE:
+		snprintf(out, capacity, "no prod.keys set, or it cannot be read");
+		return;
+	case UDS_PROD_KEYS_MISSING:
+		snprintf(out, capacity, "the file has no %s", udsProdKeyName(which));
+		return;
+	case UDS_PROD_KEYS_BAD_VALUE:
+		snprintf(out, capacity, "%s in the file is not 32 hex digits", udsProdKeyName(which));
+		return;
+	}
+	snprintf(out, capacity, "unknown");
+}

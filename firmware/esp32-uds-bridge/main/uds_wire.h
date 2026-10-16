@@ -31,9 +31,11 @@
 #define UDS_CMD_SET_BEACON 0x07 /* {mpdu...}, empty clears */
 #define UDS_CMD_SET_WATCH 0x08  /* {mac[6]}, all zero clears */
 #define UDS_CMD_PING 0x09       /* {token:u32} */
-/* The key the Game Boy wrapper needs, kept on the board (keys.h). Never sent back. */
-#define UDS_CMD_SET_KEY 0x0A    /* {slot:u8 (0x2D), key[16]} */
-#define UDS_CMD_KEY_STATUS 0x0B /* {} -> KEY_INFO */
+/* The keys kept on the board (keys.h): the 3DS key the Game Boy wrapper needs (slot 0x2D) and, on firmware built from this tree after
+ * the ESP-IDF 6.1 port, the four Switch keys for GB-Link Switch LDN's side (slots 0x80 to 0x83; older firmware answers SET_KEY for them
+ * with ESP_ERR_NOT_SUPPORTED). Never sent back. */
+#define UDS_CMD_SET_KEY 0x0A    /* {slot:u8 (0x2D, 0x80..0x83), key[16]} */
+#define UDS_CMD_KEY_STATUS 0x0B /* {} for slot 0x2D, or {slot:u8} -> KEY_INFO */
 #define UDS_CMD_ERASE_KEYS 0x0C /* {} */
 /* The Game Boy wrapper mode (gbwrap.h). Azahar never sends these; the raw radio commands above are refused while it runs. */
 #define UDS_CMD_GB_START 0x10   /* {flags:u8 (bit 0: log, bit 1: Pico), title[16] (cartridge header, 0x134), name[20] (UTF-16LE)} */

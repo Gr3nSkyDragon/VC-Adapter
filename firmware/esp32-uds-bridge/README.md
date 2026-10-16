@@ -50,16 +50,20 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
 ## Flashing a pre-built firmware (no ESP-IDF needed)
 
 Each release ships one file, `esp32-uds-bridge-fw<version>-esp32s3.bin` (bootloader, partition table
-and app merged). It is written at **offset `0x0`**, gaps included, so it also **erases the stored 3DS key**:
-store the key again after flashing. Plug the board in through its **native USB port** (the one that
+and app merged). It is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**:
+store them again after flashing. Plug the board in through its **native USB port** (the one that
 shows up as an Espressif USB Serial/JTAG device) and use one of these:
 
-**With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It
-flashes the firmware and then stores the 3DS key from your `aes_keys.txt` in one go (either step can
-be done on its own): pick the firmware (the newest `.bin` beside it is filled in), your `aes_keys.txt`
-and the board, and press Start. Only the one 16-byte key the board needs (slot 0x2D) is sent to it,
-and it is never shown or logged. It is built from mGBA-LDN's sources (`src/gb/sio/uds-esp32-setup.c`,
-target `uds-esp32-setup`) and needs nothing else installed.
+**With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It flashes the
+firmware and then stores the keys in one go (each step can be done on its own): the 3DS key from your
+`aes_keys.txt`, and the four Switch keys from your `prod.keys` (`aes_kek_generation_source`,
+`aes_key_generation_source`, `master_key_00`, `master_key_12`) that GB-Link Switch LDN's side of the
+merged firmware needs. Pick the firmware (the newest `.bin` beside it is filled in), both key files and
+the board, and press Start. Only those 16-byte keys are sent to the board (3DS slot 0x2D; the Switch
+keys in slots 0x80 to 0x83, which the firmware keeps where GB-Link Switch LDN's `ldn_keys.c` reads them),
+and they are never shown or logged. Firmware from before the ESP-IDF 6.1 port cannot keep the Switch
+keys, and the installer says so. It is built from this repository's `tools/` and needs nothing else
+installed.
 
 **In the browser (nothing to install).** Open Espressif's [esptool-js](https://espressif.github.io/esptool-js/)
 in Chrome or Edge (it needs Web Serial). Connect, pick the board's port, add the `.bin` at address

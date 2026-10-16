@@ -153,7 +153,9 @@ static void handle_command(uds_wire_frame_t *frame)
         send_status(frame->type, frame->seq, (int32_t)result);
         return;
     case UDS_CMD_KEY_STATUS: {
-        uint8_t payload[2] = {UDS_KEY_SLOT_DATA, keys_present(UDS_KEY_SLOT_DATA)};
+        /* Empty: the 3DS key, as before. One byte: that slot (a Switch key's, say). */
+        const uint8_t slot = n >= 1 ? p[0] : UDS_KEY_SLOT_DATA;
+        uint8_t payload[2] = {slot, keys_present(slot)};
         send_frame(UDS_EVT_KEY_INFO, frame->seq, 0, payload, sizeof(payload));
         return;
     }
