@@ -17,11 +17,11 @@
  * The cartridge's generation is detected by the board from its first sync (the Cable Club receptionist's: 60 in Gen 1, 61 in Gen 2),
  * since nobody can read the header of a cartridge in a Game Boy. --gen 1 or --gen 2 tells it instead (needed for firmware 1.6).
  *
- * With --port there is no GB-Link: the console's link port is wired to the board's own GPIOs (esp32-uds-bridge 1.8 on, the VC-Adapter
+ * With --port there is no GB-Link: the console's link port is wired to the board's own GPIOs (esp32-uds-bridge 1.9 on, the VC-Adapter
  * board build) and the board clocks it itself, so there is nothing to carry. This program then only starts the wrapper and shows the
  * board's log; the board also runs on its own with no PC, and this is the way to watch it.
  *
- *   GBA (GB/GBC mode) --link port, level shifter-- ESP32 (esp32-uds-bridge 1.8, VC-Adapter build) ~~ 3DS   (USB to this PC for the log only)
+ *   GBA (GB/GBC mode) --link port, level shifter-- ESP32 (esp32-uds-bridge 1.9, VC-Adapter build) ~~ 3DS   (USB to this PC for the log only)
  *
  * Usage: uds-gblink-relay [--esp32 COMx] [--gblink COMy | --port] [--key <aes_keys.txt>] [--gen 1|2] [--name NAME] [--trace <file>]
  *   --esp32, --gblink   the ports; found by their USB vendor ids when left out (Espressif 303A; GB-Link 2FE3)
@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
 	const bool detects = esp.info.major > 1 || (esp.info.major == 1 && esp.info.minor >= 7);
 	_note("board firmware %u.%u, %s", esp.info.major, esp.info.minor, udsEsp32BuildText(&esp));
 	if (linkPort && !udsEsp32HasGbPort(&esp)) {
-		_note("this firmware has no link port: flash the VC-Adapter board build (esp32-uds-bridge-fw1.8-esp32s3-vcadapter.bin or later)");
+		_note("this firmware has no link port: flash the VC-Adapter board build (esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin or later)");
 		udsEsp32Close(&esp);
 		return 1;
 	}

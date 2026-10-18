@@ -3,3 +3,6 @@
 #   idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.vcadapter" build
 # The pins are the shared VC-Adapter / GB-Link pinout (Kconfig's defaults): SC D0, SI D1, SO D2, SD D3 on a XIAO ESP32-S3.
 CONFIG_UDS_LINK_PORT=y
+# No Switch side yet: it drives a GB-Link Pico over a UART whose default pins are this board's SC and SI. Firmware 1.9 is the Game
+# Boy side only (beta) until the board gets a GBA side of its own.
+# CONFIG_UDS_SWITCH_LDN is not set

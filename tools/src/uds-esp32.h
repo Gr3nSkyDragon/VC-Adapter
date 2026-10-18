@@ -72,6 +72,10 @@ enum UDSEsp32Event {
 };
 
 #define UDS_ESP32_KEY_SLOT_DATA 0x2D // the 3DS UDS data key the board's wrapper needs
+// The four Switch keys from prod.keys, for GB-Link Switch LDN's side of the merged firmware (in enum UDSProdKey order). Firmware from
+// before the ESP-IDF 6.1 port answers SET_KEY for them with ESP_ERR_NOT_SUPPORTED.
+#define UDS_ESP32_KEY_SLOT_SWITCH_FIRST 0x80 // kek, gen, master_key_00, master_key_12: 0x80 to 0x83
+#define UDS_ESP32_KEY_SLOT_SWITCH_COUNT 4
 #define UDS_ESP32_GB_TITLE 16
 #define UDS_ESP32_GB_STATS 10
 
@@ -162,6 +166,7 @@ struct UDSEsp32 {
 	bool portFailed;
 	// Answers that are waited for (udsEsp32GbTransfer, udsEsp32KeyStatus, udsEsp32Request).
 	bool keyInfoValid;
+	uint8_t keyInfoSlot;
 	bool keyPresent;
 	bool replyValid;
 	uint8_t replySeq;
@@ -202,8 +207,12 @@ bool udsEsp32HasGbPort(const struct UDSEsp32* esp);
 const char* udsEsp32BuildText(const struct UDSEsp32* esp);
 // Stores a key in the board's flash (the board never sends it back). True when the board says it is stored.
 bool udsEsp32SetKey(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs);
+// The same, with the board's own result (0 stored; ESP_ERR_NOT_SUPPORTED, 0x106, for a slot its firmware does not keep; -1 no answer).
+int32_t udsEsp32SetKeyResult(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs);
 // Whether the board holds the UDS data key. -1: no answer.
 int udsEsp32KeyStatus(struct UDSEsp32* esp, unsigned timeoutMs);
+// Whether the board holds the key in this slot. -1: no answer, or firmware that only reports slot 0x2D.
+int udsEsp32KeyStatusSlot(struct UDSEsp32* esp, uint8_t slot, unsigned timeoutMs);
 bool udsEsp32EraseKeys(struct UDSEsp32* esp, unsigned timeoutMs);
 // Starts the board's Game Boy wrapper for the cartridge with this header title (0x134, up to 16 characters) and player name. The result
 // is the board's status (0 ok; see udsEsp32GbStartText), or -1 for no answer. `pico` (firmware 1.6 on): the cartridge is the slave
@@ -212,7 +221,7 @@ bool udsEsp32EraseKeys(struct UDSEsp32* esp, unsigned timeoutMs);
 // board is not told the generation and takes it from the cartridge's first sync, as behind a real GB-Link.
 int32_t udsEsp32GbStart(struct UDSEsp32* esp, bool log, bool pico, bool detect, const char title[UDS_ESP32_GB_TITLE],
                         const uint16_t name[10], unsigned timeoutMs);
-// Firmware 1.8 on: the cartridge is on the board's own link port (a GBA/GBC link port wired to its GPIOs, no GB-Link) and the board
+// Firmware 1.9 on (the VC-Adapter board build): the cartridge is on the board's own link port (a GBA/GBC link port wired to its GPIOs, no GB-Link) and the board
 // clocks it, as behind a Pico but with nothing for this side to carry. `detect` as above. The board answers ESP_ERR_INVALID_STATE (0x103)
 // when it was built without a link port.
 int32_t udsEsp32GbStartPort(struct UDSEsp32* esp, bool log, bool detect, const char title[UDS_ESP32_GB_TITLE], const uint16_t name[10],

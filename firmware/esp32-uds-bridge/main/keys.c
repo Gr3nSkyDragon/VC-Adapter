@@ -8,9 +8,29 @@
 
 #define KEY_NAMESPACE "uds_keys"
 
-static const char *slot_name(uint8_t slot)
+/* Where each slot lives. The Switch keys use GB-Link Switch LDN's own namespace and names (ldn_keys.c). */
+static const struct {
+    uint8_t slot;
+    const char *space;
+    const char *name;
+} kSlots[] = {
+    {UDS_KEY_SLOT_DATA, KEY_NAMESPACE, "slot2d"},
+    {UDS_KEY_SLOT_SWITCH_KEK, "ldnkeys", "kek"},
+    {UDS_KEY_SLOT_SWITCH_GEN, "ldnkeys", "gen"},
+    {UDS_KEY_SLOT_SWITCH_MASTER_00, "ldnkeys", "m00"},
+    {UDS_KEY_SLOT_SWITCH_MASTER_12, "ldnkeys", "m12"},
+};
+
+static bool slot_place(uint8_t slot, const char **space, const char **name)
 {
-    return slot == UDS_KEY_SLOT_DATA ? "slot2d" : NULL;
+    for (size_t i = 0; i < sizeof(kSlots) / sizeof(kSlots[0]); ++i) {
+        if (kSlots[i].slot == slot) {
+            *space = kSlots[i].space;
+            *name = kSlots[i].name;
+            return true;
+        }
+    }
+    return false;
 }
 
 esp_err_t keys_init(void)
@@ -26,10 +46,10 @@ esp_err_t keys_init(void)
 
 esp_err_t keys_store(uint8_t slot, const uint8_t key[16])
 {
-    const char *name = slot_name(slot);
-    if (!name) return ESP_ERR_NOT_SUPPORTED;
+    const char *space, *name;
+    if (!slot_place(slot, &space, &name)) return ESP_ERR_NOT_SUPPORTED;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(KEY_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(space, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
     err = nvs_set_blob(handle, name, key, 16);
     if (err == ESP_OK) err = nvs_commit(handle);
@@ -39,10 +59,12 @@ esp_err_t keys_store(uint8_t slot, const uint8_t key[16])
 
 bool keys_load(uint8_t slot, uint8_t key[16])
 {
-    const char *name = slot_name(slot);
-    if (!name) return false;
+    const char *space, *name;
     nvs_handle_t handle;
-    if (nvs_open(KEY_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+    if (!slot_place(slot, &space, &name) || nvs_open(space, NVS_READONLY, &handle) != ESP_OK) {
+        memset(key, 0, 16);
+        return false;
+    }
     size_t length = 16;
     bool ok = nvs_get_blob(handle, name, key, &length) == ESP_OK && length == 16;
     nvs_close(handle);

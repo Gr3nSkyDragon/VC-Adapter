@@ -66,7 +66,60 @@ struct Sim {
 	unsigned badChecksumOnce; // answer this block (1-based) with a checksum error once
 	bool corruptAfterWrite; // a flash byte goes wrong after it is written (for the MD5 check)
 	unsigned dataNacks;
+	// The RTC watchdog and the super watchdog. A reset through the native USB port leaves them as they were, so one that a crashing
+	// app left running resets the chip partway through the write unless the loader's client turns it off.
+	uint32_t rtcWdtConfig0, rtcWdtProtect, swdConf, swdProtect;
+	bool swdRunning; // the super watchdog needs feeding (SWD_AUTO_FEED off)
+	bool ignoreWatchdogWrites; // for the test that the simulated reset happens at all
+	unsigned watchdogResets;
 };
+
+static void _restart(struct Sim* sim);
+
+static bool _watchdogRunning(const struct Sim* sim) {
+	return (sim->rtcWdtConfig0 & (1u << 31)) || (sim->swdRunning && !(sim->swdConf & UDS_FLASH_SWD_AUTO_FEED));
+}
+
+static uint32_t _readSimReg(const struct Sim* sim, uint32_t address) {
+	switch (address) {
+	case UDS_FLASH_MAGIC_REG:
+		return sim->magic;
+	case UDS_FLASH_RTC_WDT_CONFIG0:
+		return sim->rtcWdtConfig0;
+	case UDS_FLASH_RTC_WDT_PROTECT:
+		return sim->rtcWdtProtect;
+	case UDS_FLASH_SWD_CONF:
+		return sim->swdConf;
+	case UDS_FLASH_SWD_PROTECT:
+		return sim->swdProtect;
+	}
+	return 0;
+}
+
+// Writes to the watchdogs' registers take effect only while their write-protect register holds the key, as on the chip.
+static void _writeSimReg(struct Sim* sim, uint32_t address, uint32_t value) {
+	if (sim->ignoreWatchdogWrites) {
+		return;
+	}
+	switch (address) {
+	case UDS_FLASH_RTC_WDT_PROTECT:
+		sim->rtcWdtProtect = value;
+		break;
+	case UDS_FLASH_RTC_WDT_CONFIG0:
+		if (sim->rtcWdtProtect == UDS_FLASH_RTC_WDT_KEY) {
+			sim->rtcWdtConfig0 = value;
+		}
+		break;
+	case UDS_FLASH_SWD_PROTECT:
+		sim->swdProtect = value;
+		break;
+	case UDS_FLASH_SWD_CONF:
+		if (sim->swdProtect == UDS_FLASH_SWD_KEY) {
+			sim->swdConf = value;
+		}
+		break;
+	}
+}
 
 static void _emit(struct Sim* sim, const uint8_t* bytes, size_t length) {
 	if (sim->outLength + length <= sizeof(sim->out)) {
@@ -124,7 +177,15 @@ static void _handle(struct Sim* sim, const uint8_t* f, size_t length) {
 		return;
 	}
 	case UDS_FLASH_READ_REG:
-		_respond(sim, command, size == 4 && _u32(data) == UDS_FLASH_MAGIC_REG ? sim->magic : 0, NULL, 0, size == 4 ? 0 : 1, 0x05);
+		_respond(sim, command, size == 4 ? _readSimReg(sim, _u32(data)) : 0, NULL, 0, size == 4 ? 0 : 1, 0x05);
+		return;
+	case UDS_FLASH_WRITE_REG: // {address, value, mask, delay}
+		if (size != 16) {
+			_respond(sim, command, 0, NULL, 0, 1, 0x05);
+			return;
+		}
+		_writeSimReg(sim, _u32(&data[0]), (_readSimReg(sim, _u32(&data[0])) & ~_u32(&data[8])) | (_u32(&data[4]) & _u32(&data[8])));
+		_respond(sim, command, 0, NULL, 0, 0, 0);
 		return;
 	case UDS_FLASH_SPI_ATTACH:
 		sim->attached = size == 8;
@@ -163,6 +224,12 @@ static void _handle(struct Sim* sim, const uint8_t* f, size_t length) {
 		uint32_t blockSize = _u32(&data[0]);
 		uint32_t seq = _u32(&data[4]);
 		const uint8_t* block = &data[16];
+		if (seq == 40 && _watchdogRunning(sim)) { // a few seconds into the write
+			++sim->watchdogResets;
+			sim->bootRequest = false;
+			_restart(sim);
+			return;
+		}
 		if (blockSize != sim->beginBlockSize || size != 16 + blockSize || seq != sim->nextSeq) {
 			_respond(sim, command, 0, NULL, 0, 1, 0x05);
 			return;
@@ -546,6 +613,40 @@ static void testRealImage(const char* path) {
 	free(image);
 }
 
+// A board whose old firmware crashed: its panic handler left the RTC watchdog running, and the super watchdog wants feeding. A reset
+// through the native USB port leaves both running in the ROM loader, so the chip resets partway through the write unless they are
+// turned off first (what uds-esp32-setup hit on a board left in a crash loop: "writing block 581 of 979 failed").
+static void testWatchdogs(void) {
+	struct Sim sim;
+	uint8_t* image = _makeImage();
+	struct UDSFlashOptions options = {true};
+	char error[300] = "";
+
+	_simInit(&sim);
+	sim.disconnectOnReset = true;
+	sim.rtcWdtConfig0 = (1u << 31) | (5u << 28) | (1u << 8) | 2; // armed, as a panic handler leaves it
+	sim.swdRunning = true;
+	CHECK(udsFlashWriteImage(&sim.d, &kHandlers, &options, image, IMAGE_SIZE, error, sizeof(error)),
+	      "written with the watchdogs running (%s)", error);
+	CHECK(!sim.watchdogResets, "no watchdog reset during the write (%u)", sim.watchdogResets);
+	CHECK(sim.rtcWdtConfig0 == 0 && (sim.swdConf & UDS_FLASH_SWD_AUTO_FEED), "the RTC watchdog is off and the super watchdog feeds itself "
+	      "(%08X, %08X)", (unsigned) sim.rtcWdtConfig0, (unsigned) sim.swdConf);
+	CHECK(sim.rtcWdtProtect == 0 && sim.swdProtect == 0, "both write-protect registers are locked again");
+	CHECK(!memcmp(sim.flash, image, IMAGE_SIZE), "the flash holds the image");
+	free(sim.flash);
+
+	// Left alone, the simulated watchdog does reset the chip mid-write, so the checks above mean something.
+	_simInit(&sim);
+	sim.disconnectOnReset = true;
+	sim.rtcWdtConfig0 = 1u << 31;
+	sim.ignoreWatchdogWrites = true;
+	error[0] = 0;
+	CHECK(!udsFlashWriteImage(&sim.d, &kHandlers, &options, image, IMAGE_SIZE, error, sizeof(error)) && sim.watchdogResets == 1,
+	      "a watchdog left running ends the write (%u resets: %s)", sim.watchdogResets, error);
+	free(sim.flash);
+	free(image);
+}
+
 int main(void) {
 	const char* real = getenv("UDS_FLASH_TEST_IMAGE");
 	if (real && *real) {
@@ -558,6 +659,7 @@ int main(void) {
 	testFlash(false, 5, true);
 	testFlash(false, 0, false); // lines that change on their own (another driver, or a USB-to-UART bridge's)
 	testAlreadyInDownloadMode();
+	testWatchdogs();
 	testFailures();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

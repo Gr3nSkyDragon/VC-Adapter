@@ -1,6 +1,10 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version. */
 #include "radio.h"
 
+#include "diag.h"
+#include "esp_log.h"
+
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -44,7 +48,9 @@ static uds_stats_t s_stats;
 
 static SemaphoreHandle_t s_tx_lock;
 static esp_timer_handle_t s_beacon_timer;
-static uint8_t s_beacon[MAX_MPDU];
+/* From the heap at radio_init, so that a board in GB-Link Switch LDN's mode (bridge_mode.h) does not carry them. */
+static uint8_t *s_beacon; /* MAX_MPDU */
+static uint8_t *s_event;  /* RX_HEADER + MAX_MPDU: promiscuous_rx, on the Wi-Fi task only */
 static size_t s_beacon_length;
 static uint16_t s_beacon_sequence;
 static wifi_phy_rate_t s_current_rate = (wifi_phy_rate_t)-1;
@@ -140,7 +146,7 @@ static void promiscuous_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
     const int subtype = (frame_control >> 4) & 0xF;
     if (!wanted(frame, length, frame_type, subtype)) return;
 
-    static uint8_t event[RX_HEADER + MAX_MPDU];
+    uint8_t *event = s_event;
     event[0] = (uint8_t)packet->rx_ctrl.channel;
     event[1] = (uint8_t)(int8_t)packet->rx_ctrl.rssi;
     event[2] = 0;
@@ -202,7 +208,9 @@ esp_err_t radio_init(uds_event_sink_t sink)
 {
     s_sink = sink;
     s_tx_lock = xSemaphoreCreateMutex();
-    if (!s_tx_lock) return ESP_ERR_NO_MEM;
+    s_beacon = malloc(MAX_MPDU);
+    s_event = malloc(RX_HEADER + MAX_MPDU);
+    if (!s_tx_lock || !s_beacon || !s_event) return ESP_ERR_NO_MEM;
     const esp_timer_create_args_t timer_args = {.callback = beacon_tick, .name = "beacon"};
     return esp_timer_create(&timer_args, &s_beacon_timer);
 }
@@ -215,17 +223,42 @@ static esp_err_t init_wifi_once(void)
         nvs_flash_erase();
         result = nvs_flash_init();
     }
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        ESP_LOGE("radio", "nvs_flash_init failed: %s", esp_err_to_name(result));
+        return result;
+    }
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_init());
     esp_event_loop_create_default(); /* may already exist */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-    if ((result = esp_wifi_init(&config)) != ESP_OK) return result;
-    if ((result = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) return result;
-    if ((result = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) return result;
+    /* Raw capture and injection: more buffers than ESP-IDF's defaults, and no aggregation. The project's sdkconfig keeps the
+     * defaults, which GB-Link Switch LDN's side is built and tested with; these numbers are this side's only. */
+    config.static_rx_buf_num = 16;
+    config.dynamic_rx_buf_num = 64;
+    config.dynamic_tx_buf_num = 64;
+    config.ampdu_rx_enable = 0;
+    config.ampdu_tx_enable = 0;
+    diag_report("before esp_wifi_init");
+    if ((result = esp_wifi_init(&config)) != ESP_OK) {
+        ESP_LOGE("radio", "esp_wifi_init (static rx %d, dynamic rx %d, dynamic tx %d) failed: %s", config.static_rx_buf_num,
+                 config.dynamic_rx_buf_num, config.dynamic_tx_buf_num, esp_err_to_name(result));
+        diag_report("after the failed esp_wifi_init");
+        return result;
+    }
+    diag_report("after esp_wifi_init");
+    if ((result = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) {
+        ESP_LOGE("radio", "esp_wifi_set_storage failed: %s", esp_err_to_name(result));
+        return result;
+    }
+    if ((result = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) {
+        ESP_LOGE("radio", "esp_wifi_set_mode failed: %s", esp_err_to_name(result));
+        return result;
+    }
     /* 802.11b/g only: the 3DS speaks nothing newer, and it keeps ACK rates plain. */
     if ((result = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G)) !=
-        ESP_OK)
+        ESP_OK) {
+        ESP_LOGE("radio", "esp_wifi_set_protocol failed: %s", esp_err_to_name(result));
         return result;
+    }
     s_wifi_initialized = true;
     return ESP_OK;
 }
@@ -274,6 +307,10 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
         }
     }
     xSemaphoreGive(s_tx_lock);
+    if (result != ESP_OK) {
+        ESP_LOGE("radio", "radio_start (set_mac, start, promiscuous or channel) failed: %s", esp_err_to_name(result));
+        diag_report("after the failed radio_start");
+    }
     return result;
 }
 

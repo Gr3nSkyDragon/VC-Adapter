@@ -1,0 +1,6 @@
+# The 3DS side and GB-Link Switch LDN's side together need more than the default 1 MB app slot. NVS (the keys and the boot
+# mode) stays where the default table and GB-Link's own put it, so their firmware and this one find the same keys.
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x300000,

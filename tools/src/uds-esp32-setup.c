@@ -4,15 +4,16 @@
 
 /*
  * uds-esp32-setup: sets up an ESP32-S3 board for Game Boy Virtual Console trades with a 3DS, with no Python, ESP-IDF or mGBA. It
- * flashes a release image of the esp32-uds-bridge firmware (uds-esp32-flash.c) and stores the 3DS UDS key from the user's
- * aes_keys.txt on the board (the same request as uds-esp32-probe --store-key; only the one 16-byte key leaves the PC, and it is never
- * shown or logged). Either step can be done on its own. Flashing writes the whole image, which erases the key store, so with both
- * ticked the key is stored after the flash.
+ * flashes a release image of the esp32-uds-bridge firmware (uds-esp32-flash.c), then stores the keys the board needs: the 3DS UDS key
+ * from the user's aes_keys.txt (the same request as uds-esp32-probe --store-key), and the four Switch keys from their prod.keys that
+ * GB-Link Switch LDN's side of the merged firmware reads. Only those 16-byte keys leave the PC, and they are never shown or logged.
+ * Each step can be done on its own. Flashing writes the whole image, which erases the key store, so the keys are stored after the
+ * flash; a board is never assumed to have them already.
  *
- * The firmware comes in two builds (package-release-bin.ps1): the GB-Link build, for a board on the PC's USB with a GB-Link, and the
- * VC-Adapter board build, for a board wired to the console's link port. The "Build for" choice picks the newest image of that build
- * next to this program; an image's build is read from its version (1.8-vcadapter), and an image from before the split counts as the
- * GB-Link build.
+ * The firmware comes in two builds (package-release-bin.ps1): firmware 1.8, the GB-Link build (3DS and Switch sides), for a board
+ * on the PC's USB with a GB-Link, and firmware 1.9, the VC-Adapter board build (beta, Game Boy side only), for a board wired to the
+ * console's link port. The "Build for" choice picks the newest image of that build next to this program; an image's build is read
+ * from its version (1.9-vcadapter), and an image from before the split counts as the GB-Link build.
  *
  * Windows only (Win32, no other dependencies). Build target: uds-esp32-setup.
  */
@@ -51,6 +52,9 @@ enum {
 	ID_KEY_CHECK,
 	ID_KEY_EDIT,
 	ID_KEY_BROWSE,
+	ID_SWITCH_CHECK,
+	ID_SWITCH_EDIT,
+	ID_SWITCH_BROWSE,
 	ID_PORT_LABEL,
 	ID_PORT_COMBO,
 	ID_PORT_REFRESH,
@@ -75,8 +79,10 @@ static size_t sPortCount;
 struct Job {
 	bool flash;
 	bool key;
+	bool switchKeys;
 	char firmware[MAX_PATH];
 	char keys[MAX_PATH];
+	char prodKeys[MAX_PATH];
 	char port[32];
 	bool usbJtag;
 };
@@ -95,7 +101,7 @@ static const char* _buildName(enum Build build) {
 	return build == BUILD_VCADAPTER ? "VC-Adapter board build" : build == BUILD_GBLINK ? "GB-Link build" : "build not marked";
 }
 
-// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "1.8-vcadapter"). Unmarked: from before the
+// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "1.9-vcadapter"). Unmarked: from before the
 // split, or built by hand with idf.py.
 static enum Build _imageBuild(const struct UDSFlashImageInfo* info) {
 	if (strstr(info->version, "-vcadapter")) {
@@ -111,7 +117,7 @@ static HWND _item(int id) {
 	return GetDlgItem(sWindow, id);
 }
 
-// Settings: the two paths, so that updating a board later is one click. The key itself is never stored here.
+// Settings: the paths, so that updating a board later is one click. The keys themselves are never stored here.
 static void _loadSetting(const char* name, char* out, DWORD capacity) {
 	DWORD size = capacity;
 	if (RegGetValueA(HKEY_CURRENT_USER, SETTINGS_KEY, name, RRF_RT_REG_SZ, NULL, out, &size) != ERROR_SUCCESS) {
@@ -185,6 +191,7 @@ static bool _openBoard(struct UDSEsp32* esp, const char* port, unsigned timeoutM
 static DWORD WINAPI _work(LPVOID param) {
 	struct Job* job = param;
 	uint8_t key[16];
+	uint8_t switchKeys[UDS_PROD_KEY_COUNT][16];
 	uint8_t* image = NULL;
 	size_t size = 0;
 	bool ok = false;
@@ -200,6 +207,18 @@ static DWORD WINAPI _work(LPVOID param) {
 			goto done;
 		}
 		_log("Keys: %s", udsKeyStatusText(status));
+	}
+	if (job->switchKeys) {
+		enum UDSProdKey which = UDS_PROD_KEY_KEK;
+		enum UDSProdKeysStatus status = udsProdKeysLoad(job->prodKeys, switchKeys, &which);
+		char text[160];
+		udsProdKeysStatusText(status, which, text, sizeof(text));
+		_log("Switch keys: %s", text);
+		if (status != UDS_PROD_KEYS_OK) {
+			summary = "The prod.keys file does not have the four Switch keys the board needs (see the log). Nothing was changed on the "
+			          "board.";
+			goto done;
+		}
 	}
 	if (job->flash) {
 		image = _readFile(job->firmware, &size);
@@ -267,33 +286,60 @@ static DWORD WINAPI _work(LPVOID param) {
 			goto done;
 		}
 		_log("Firmware %u.%u is running (protocol %u, %s)", esp.info.major, esp.info.minor, esp.info.proto, udsEsp32BuildText(&esp));
+		if ((job->key || job->switchKeys) && !udsEsp32HasGbWrapper(&esp)) {
+			udsEsp32Close(&esp);
+			_log("This firmware keeps no keys: version 1.4 or later is needed");
+			summary = "The board's firmware is too old to keep keys. Flash 1.4 or later.";
+			goto done;
+		}
 		if (job->key) {
-			if (!udsEsp32HasGbWrapper(&esp)) {
-				udsEsp32Close(&esp);
-				_log("This firmware keeps no keys: version 1.4 or later is needed");
-				summary = "The board's firmware is too old to keep the key. Flash 1.4 or later.";
-				goto done;
-			}
 			bool stored = udsEsp32SetKey(&esp, UDS_ESP32_KEY_SLOT_DATA, key, 3000);
 			int present = stored ? udsEsp32KeyStatus(&esp, 1000) : -1;
-			udsEsp32Close(&esp);
 			if (!stored || present != 1) {
-				_log("The board did not store the key");
-				summary = "The key was not stored (see the log).";
+				udsEsp32Close(&esp);
+				_log("The board did not store the 3DS key");
+				summary = "The 3DS key was not stored (see the log).";
 				goto done;
 			}
 			_log("The 3DS UDS key is stored on the board");
-		} else {
-			udsEsp32Close(&esp);
 		}
+		if (job->switchKeys) {
+			size_t k;
+			for (k = 0; k < UDS_PROD_KEY_COUNT; ++k) {
+				const uint8_t slot = (uint8_t) (UDS_ESP32_KEY_SLOT_SWITCH_FIRST + k);
+				const char* name = udsProdKeyName((enum UDSProdKey) k);
+				int32_t result = udsEsp32SetKeyResult(&esp, slot, switchKeys[k], 3000);
+				if (result == 0x106) { // ESP_ERR_NOT_SUPPORTED: firmware from before the Switch key slots
+					udsEsp32Close(&esp);
+					_log("This firmware cannot keep the Switch keys: flash a build from after the ESP-IDF 6.1 port");
+					summary = "The board's firmware is too old to keep the Switch keys (see the log).";
+					goto done;
+				}
+				int present = result == 0 ? udsEsp32KeyStatusSlot(&esp, slot, 1000) : -1;
+				if (result != 0 || present != 1) {
+					udsEsp32Close(&esp);
+					_log("The board did not store %s (result %ld)", name, (long) result);
+					summary = "The Switch keys were not all stored (see the log).";
+					goto done;
+				}
+			}
+			_log("The four Switch keys are stored on the board");
+		}
+		udsEsp32Close(&esp);
 	}
 	ok = true;
-	summary = job->flash && job->key ? "Done: the firmware is flashed and the key is stored. The board is ready."
-	        : job->flash             ? "Done: the firmware is flashed. Store the key before trading (flashing erased it)."
-	                                 : "Done: the key is stored on the board.";
+	if (job->flash && (!job->key || !job->switchKeys)) {
+		summary = job->key ? "Done: the firmware is flashed and the 3DS key stored. Store the Switch keys too: flashing erased them."
+		        : job->switchKeys ? "Done: the firmware is flashed and the Switch keys stored. Store the 3DS key too: flashing erased it."
+		                          : "Done: the firmware is flashed. Store the keys before trading: flashing erased them.";
+	} else {
+		summary = job->flash ? "Done: the firmware is flashed and the keys are stored. The board is ready."
+		                     : "Done: the keys are stored on the board.";
+	}
 
 done:
 	memset(key, 0, sizeof(key));
+	memset(switchKeys, 0, sizeof(switchKeys));
 	free(image);
 	free(job);
 	_finish(ok, summary);
@@ -360,17 +406,21 @@ static void _showFirmwareInfo(void) {
 static void _updateEnabled(void) {
 	bool flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
 	bool key = IsDlgButtonChecked(sWindow, ID_KEY_CHECK) == BST_CHECKED;
+	bool switchKeys = IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
 	EnableWindow(_item(ID_FW_CHECK), !sBusy);
 	EnableWindow(_item(ID_KEY_CHECK), !sBusy);
+	EnableWindow(_item(ID_SWITCH_CHECK), !sBusy);
 	EnableWindow(_item(ID_FW_EDIT), !sBusy && flash);
 	EnableWindow(_item(ID_FW_BROWSE), !sBusy && flash);
 	EnableWindow(_item(ID_BUILD_GBLINK), !sBusy && flash);
 	EnableWindow(_item(ID_BUILD_VCADAPTER), !sBusy && flash);
 	EnableWindow(_item(ID_KEY_EDIT), !sBusy && key);
 	EnableWindow(_item(ID_KEY_BROWSE), !sBusy && key);
+	EnableWindow(_item(ID_SWITCH_EDIT), !sBusy && switchKeys);
+	EnableWindow(_item(ID_SWITCH_BROWSE), !sBusy && switchKeys);
 	EnableWindow(_item(ID_PORT_COMBO), !sBusy);
 	EnableWindow(_item(ID_PORT_REFRESH), !sBusy);
-	EnableWindow(_item(ID_START), !sBusy && (flash || key));
+	EnableWindow(_item(ID_START), !sBusy && (flash || key || switchKeys));
 	SetWindowTextA(_item(ID_START), sBusy ? "Working..." : "Start");
 }
 
@@ -422,8 +472,10 @@ static void _start(void) {
 	struct Job* job = calloc(1, sizeof(*job));
 	job->flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
 	job->key = IsDlgButtonChecked(sWindow, ID_KEY_CHECK) == BST_CHECKED;
+	job->switchKeys = IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
 	GetWindowTextA(_item(ID_FW_EDIT), job->firmware, sizeof(job->firmware));
 	GetWindowTextA(_item(ID_KEY_EDIT), job->keys, sizeof(job->keys));
+	GetWindowTextA(_item(ID_SWITCH_EDIT), job->prodKeys, sizeof(job->prodKeys));
 	int current = (int) SendMessageA(_item(ID_PORT_COMBO), CB_GETCURSEL, 0, 0);
 	const char* problem = NULL;
 	if (current < 0 || (size_t) current >= sPortCount) {
@@ -432,6 +484,8 @@ static void _start(void) {
 		problem = "Choose the firmware file (esp32-uds-bridge-fw<version>-esp32s3-<build>.bin).";
 	} else if (job->key && !job->keys[0]) {
 		problem = "Choose your aes_keys.txt.";
+	} else if (job->switchKeys && !job->prodKeys[0]) {
+		problem = "Choose your prod.keys (the Switch keys).";
 	}
 	if (problem) {
 		free(job);
@@ -449,6 +503,9 @@ static void _start(void) {
 	}
 	if (job->key) {
 		_saveSetting("keys", job->keys);
+	}
+	if (job->switchKeys) {
+		_saveSetting("prodkeys", job->prodKeys);
 	}
 	SetWindowTextA(_item(ID_LOG), "");
 	SendMessageA(_item(ID_PROGRESS), PBM_SETPOS, 0, 0);
@@ -534,24 +591,55 @@ static void _defaultKeys(char* out, size_t capacity) {
 	out[0] = 0;
 }
 
+// A prod.keys next to this program, or where the common Switch emulators keep it, if it is there.
+static void _defaultProdKeys(char* out, size_t capacity) {
+	static const char* const kPlaces[] = {"Ryujinx\\system", "yuzu\\keys", "suyu\\keys", "sudachi\\keys", "citron\\keys", "eden\\keys"};
+	char dir[MAX_PATH];
+	DWORD length = GetModuleFileNameA(NULL, dir, sizeof(dir));
+	char* slash = length ? strrchr(dir, '\\') : NULL;
+	if (slash) {
+		slash[1] = 0;
+		snprintf(out, capacity, "%sprod.keys", dir);
+		if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) {
+			return;
+		}
+	}
+	char appData[MAX_PATH];
+	out[0] = 0;
+	if (!GetEnvironmentVariableA("APPDATA", appData, sizeof(appData))) {
+		return;
+	}
+	size_t i;
+	for (i = 0; i < sizeof(kPlaces) / sizeof(kPlaces[0]); ++i) {
+		snprintf(out, capacity, "%s\\%s\\prod.keys", appData, kPlaces[i]);
+		if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) {
+			return;
+		}
+	}
+	out[0] = 0;
+}
+
 static void _create(void) {
 	_control("BUTTON", "Flash this firmware:", BS_AUTOCHECKBOX | WS_TABSTOP, ID_FW_CHECK, 12, 12, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_FW_EDIT, 30, 34, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_FW_BROWSE, 488, 33, 100, 26);
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
 	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
-	_control("BUTTON", "GB-Link (board on this PC's USB)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
-	_control("BUTTON", "VC-Adapter board (link port)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
+	_control("BUTTON", "GB-Link + Switch (firmware 1.8)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
+	_control("BUTTON", "VC-Adapter board, beta (1.9)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
 	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 142, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 141, 100, 26);
-	_control("STATIC", "Board:", SS_LEFT, ID_PORT_LABEL, 12, 182, 60, 20);
-	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 178, 408, 200);
-	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 177, 100, 26);
-	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 218, 140, 30);
-	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 224, 424, 18);
+	_control("BUTTON", "Store the Switch keys from (prod.keys):", BS_AUTOCHECKBOX | WS_TABSTOP, ID_SWITCH_CHECK, 12, 172, 400, 20);
+	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_SWITCH_EDIT, 30, 194, 450, 24);
+	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_SWITCH_BROWSE, 488, 193, 100, 26);
+	_control("STATIC", "Board:", SS_LEFT, ID_PORT_LABEL, 12, 234, 60, 20);
+	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 230, 408, 200);
+	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 229, 100, 26);
+	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 270, 140, 30);
+	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 276, 424, 18);
 	SendMessageA(_item(ID_PROGRESS), PBM_SETRANGE32, 0, 1000);
-	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 258, 576, 190);
+	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 310, 576, 190);
 
 	char path[MAX_PATH];
 	_loadSetting("build", path, sizeof(path));
@@ -566,8 +654,14 @@ static void _create(void) {
 		_defaultKeys(path, sizeof(path));
 	}
 	SetWindowTextA(_item(ID_KEY_EDIT), path);
+	_loadSetting("prodkeys", path, sizeof(path));
+	if (!path[0]) {
+		_defaultProdKeys(path, sizeof(path));
+	}
+	SetWindowTextA(_item(ID_SWITCH_EDIT), path);
 	CheckDlgButton(sWindow, ID_FW_CHECK, BST_CHECKED);
 	CheckDlgButton(sWindow, ID_KEY_CHECK, BST_CHECKED);
+	CheckDlgButton(sWindow, ID_SWITCH_CHECK, BST_CHECKED);
 	_showFirmwareInfo();
 	_refreshPorts();
 	_updateEnabled();
@@ -583,6 +677,7 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 		switch (LOWORD(wParam)) {
 		case ID_FW_CHECK:
 		case ID_KEY_CHECK:
+		case ID_SWITCH_CHECK:
 			_updateEnabled();
 			break;
 		case ID_BUILD_GBLINK:
@@ -597,6 +692,9 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 			break;
 		case ID_KEY_BROWSE:
 			_browse(ID_KEY_EDIT, "Key files (*.txt)\0*.txt\0All files\0*.*\0", "Choose your aes_keys.txt");
+			break;
+		case ID_SWITCH_BROWSE:
+			_browse(ID_SWITCH_EDIT, "Switch keys (*.keys)\0*.keys\0All files\0*.*\0", "Choose your prod.keys");
 			break;
 		case ID_FW_EDIT:
 			if (HIWORD(wParam) == EN_KILLFOCUS) {
@@ -671,7 +769,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 	RegisterClassA(&wc);
 
 	DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-	RECT rect = {0, 0, _px(600), _px(460)};
+	RECT rect = {0, 0, _px(600), _px(512)};
 	AdjustWindowRect(&rect, style, FALSE);
 	HWND hwnd = CreateWindowExA(0, wc.lpszClassName, TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
 	                            NULL, NULL, instance, NULL);

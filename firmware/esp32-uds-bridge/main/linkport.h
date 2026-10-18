@@ -1,6 +1,6 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
- * A Game Boy link port wired straight to this board's GPIOs, with no GB-Link (Pico) between: firmware 1.8 on, CONFIG_UDS_LINK_PORT.
+ * A Game Boy link port wired straight to this board's GPIOs, with no GB-Link (Pico) between: firmware 1.9 on (the VC-Adapter board build), CONFIG_UDS_LINK_PORT.
  * The board does here what the Pico's SPI did in Game Boy mode: it is the clock master and shifts one byte at a time, MSB first, the
  * clock idle high, each bit put out on the falling edge and read before the rising one, fast as the Pico does (262144 Hz unless
  * menuconfig says otherwise; linkport.c says why not a Game Boy's own 8192 Hz). The cartridge, in a GBA (in its GB/GBC mode), a GBC or

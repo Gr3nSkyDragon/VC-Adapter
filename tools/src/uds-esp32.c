@@ -234,6 +234,7 @@ static void _dispatch(struct UDSEsp32* esp, const struct UDSEsp32Frame* frame) {
 	case UDS_ESP32_EVT_KEY_INFO:
 		if (frame->length >= 2) {
 			esp->keyInfoValid = true;
+			esp->keyInfoSlot = p[0];
 			esp->keyPresent = p[1] != 0;
 		}
 		break;
@@ -468,13 +469,17 @@ static int32_t _request(struct UDSEsp32* esp, uint8_t type, const uint8_t* paylo
 	return -1;
 }
 
-bool udsEsp32SetKey(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs) {
+int32_t udsEsp32SetKeyResult(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs) {
 	uint8_t payload[17];
 	payload[0] = slot;
 	memcpy(&payload[1], key, 16);
 	int32_t result = _request(esp, UDS_ESP32_CMD_SET_KEY, payload, sizeof(payload), timeoutMs);
 	memset(payload, 0, sizeof(payload));
-	return result == 0;
+	return result;
+}
+
+bool udsEsp32SetKey(struct UDSEsp32* esp, uint8_t slot, const uint8_t key[16], unsigned timeoutMs) {
+	return udsEsp32SetKeyResult(esp, slot, key, timeoutMs) == 0;
 }
 
 int udsEsp32KeyStatus(struct UDSEsp32* esp, unsigned timeoutMs) {
@@ -483,6 +488,15 @@ int udsEsp32KeyStatus(struct UDSEsp32* esp, unsigned timeoutMs) {
 		return -1;
 	}
 	return esp->keyPresent ? 1 : 0;
+}
+
+int udsEsp32KeyStatusSlot(struct UDSEsp32* esp, uint8_t slot, unsigned timeoutMs) {
+	esp->keyInfoValid = false;
+	if (!_send(esp, UDS_ESP32_CMD_KEY_STATUS, 0, &slot, 1) || !_await(esp, &esp->keyInfoValid, timeoutMs)) {
+		return -1;
+	}
+	// Firmware that does not read the slot byte answers for 0x2D.
+	return esp->keyInfoSlot != slot ? -1 : esp->keyPresent ? 1 : 0;
 }
 
 bool udsEsp32EraseKeys(struct UDSEsp32* esp, unsigned timeoutMs) {

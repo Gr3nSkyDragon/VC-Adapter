@@ -1,5 +1,22 @@
 menu "UDS bridge"
 
+config UDS_SWITCH_LDN
+    bool "Switch side: GB-Link Switch LDN (needs ESP-IDF 6.1)"
+    default y
+    help
+        GB-Link Switch LDN's bridge (ldn/), with the board switching between it and the 3DS side by what the host speaks. Its GBA
+        side drives a GB-Link Pico (on the UART, or through a host), so the GB-Link profile has it. The VC-Adapter board profile
+        turns it off until that board has a GBA side of its own (its link port pins are the Pico UART's defaults). Ignored with
+        ESP-IDF 5.x, which cannot build it.
+
+config UDS_FIRMWARE_MINOR
+    int
+    default 9 if UDS_LINK_PORT
+    default 8
+    help
+        The firmware's version is 1.<this>, by profile: 1.8 the GB-Link build (3DS side + Switch side), 1.9 the VC-Adapter board
+        build (link port; beta, Game Boy side only).
+
 config UDS_LINK_PORT
     bool "Game Boy link port wired to GPIOs (no GB-Link)"
     default n
@@ -55,7 +72,7 @@ config UDS_LINK_PORT_CLOCK_HZ
         How fast the 8 bits of each byte are clocked (how often bytes go is the pacing below). 262144 is a Game Boy Color's fast serial
         clock, well inside what a Game Boy takes as a slave, and makes a byte about 31 us. The GB-Link's Pico clocks at about 1 MHz.
         8192, a Game Boy's own clock, makes a byte a millisecond: long enough that a cartridge re-arming its serial port in the
-        middle of one loses its place (the first hardware run, firmware 1.8 before this setting).
+        middle of one loses its place (the link port's first hardware run, before this setting).
 
 config UDS_LINK_PORT_PACE_US
     int "Extra wait after each byte while roles are chosen and data is exchanged, in microseconds"
@@ -68,3 +85,6 @@ config UDS_LINK_PORT_PACE_US
         the gaps a cartridge has been seen to keep up with. The idle, sync and menu loops keep their 12.6 ms period either way.
 
 endmenu
+
+# GB-Link Switch LDN's options (the Switch side, ldn/). Its zstd component reads PIA_ZSTD_LITERAL_BUFFER from here.
+rsource "../ldn/Kconfig.projbuild"

@@ -17,6 +17,41 @@ authentication/association handshake, beacons' contents and everything else stay
 | Beacon cadence | Azahar hands over a beacon template; the board sends it every 102.4 ms with a fresh timestamp and sequence number, so USB jitter never shows up as a missing beacon. |
 | Channel | Azahar drives discovery hopping (1, 6, 11) and channel selection with `SET_CHANNEL`, exactly like the desktop monitor. |
 
+## Versions: two build profiles
+
+One codebase, two builds (`package-release-bin.ps1`, see "Build and flash"):
+
+| Profile | Firmware | For | What it has |
+| --- | --- | --- | --- |
+| **1**, `gblink` | **1.8** | A board on a PC's or phone's USB: Azahar, mGBA, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks |
+| **2**, `vcadapter` | **1.9 (beta)** | The VC-Adapter board, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the link port, running on its own. Game Boy only for now: no Switch side until the board has a GBA side of its own |
+
+The profile is a set of menuconfig choices: `sdkconfig.defaults` is profile 1, `sdkconfig.defaults` + `sdkconfig.vcadapter`
+profile 2 (`CONFIG_UDS_LINK_PORT` on, `CONFIG_UDS_SWITCH_LDN` off). The firmware reports its version, 1.8 or 1.9, from
+`CONFIG_UDS_FIRMWARE_MINOR`, which follows the profile.
+
+## Two modes: 3DS and Switch (firmware 1.8)
+
+Built with ESP-IDF 6.1 (the version GB-Link Switch LDN pins), the firmware also carries GB-Link Switch LDN's bridge
+(`ldn/`, AGPL-3.0, see its README): the board can join or host a Switch's local wireless room for a GBA game, as GB-Link's
+own firmware does. The two sides cannot share the radio, so the board runs one at a time (`main/bridge_mode.c`):
+
+- **3DS mode**: everything described here.
+- **Switch mode** (the default): GB-Link Switch LDN's bridge, unchanged: its text console, `LDN_BINARY` framing and
+  commands, for mGBA's Switch backend, GB-Link's web client or a GB-Link.
+
+The host picks the mode by talking to the board. In 3DS mode, GB-Link's console (`LDN_...`) restarts the board in Switch mode
+whenever no frame of this protocol has come for 2 s (a 3DS host sends them all the time, and opening the port does not reset
+the board); in Switch mode, this protocol's HELLO restarts it in 3DS mode at any time, binary console or not (none of GB-Link
+Switch LDN's frames can be one). The host's first attempt then fails while the board restarts, and its next attempt finds the
+right mode (mGBA's Switch backend retries about every 12 s, its 3DS side and Azahar keep asking; `uds-gblink-relay` has to be
+run again). The mode is kept in NVS, so the board comes back in the last one
+used. After three crashes in a row in one mode (panic or watchdog resets), the board stores and boots the other, so a mode
+that cannot start never holds it in a reset loop. RAM is shared between the modes: the 3DS side's large buffers come from the
+heap when it starts, so Switch mode has as much free RAM as GB-Link's own firmware, and in 3DS mode the Switch side's static
+data (one block, `components/ldn_bridge/linker.lf`) is handed to the heap. The Switch keys it needs are stored by uds-esp32-setup (below). Built
+with ESP-IDF 5.x, the firmware has the 3DS mode only.
+
 ## Hardware
 
 Any ESP32-S3 board. **Use the chip's native USB port** (the one wired to GPIO19/20, usually labelled
@@ -47,7 +82,7 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
   --size 48` for colour Pokemon sprites; it prints each picture in the terminal, and `--preview
   out.png` writes it enlarged.
 
-### GBA link port, no GB-Link (firmware 1.8)
+### GBA link port, no GB-Link (firmware 1.9, beta)
 
 The **VC-Adapter board build** (`esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
 `CONFIG_UDS_LINK_PORT`, menuconfig's UDS bridge > **Game Boy link port wired to GPIOs**) needs no GB-Link: a GBA (playing a GB/GBC cartridge), GBC or Game Boy link port is wired to four GPIOs through a level
@@ -101,18 +136,23 @@ its log.
 ## Flashing a pre-built firmware (no ESP-IDF needed)
 
 Each release ships one file per build (bootloader, partition table and app merged):
-`esp32-uds-bridge-fw<version>-esp32s3-gblink.bin` for a board on the PC's or phone's USB (Azahar, mGBA, a GB-Link through
-uds-gblink-relay), and `esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin` for the VC-Adapter board on the console's link port.
-Images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build. Either file is written at
-**offset `0x0`**, gaps included, so it also **erases the stored 3DS key**: store the key again after flashing. Plug the board
-in through its **native USB port** (the one that shows up as an Espressif USB Serial/JTAG device) and use one of these:
+`esp32-uds-bridge-fw1.8-esp32s3-gblink.bin`, **firmware 1.8**, for a board on the PC's or phone's USB (Azahar, mGBA, a GB-Link
+through uds-gblink-relay; the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks), and
+`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`, **firmware 1.9 (beta)**, for the VC-Adapter board on the console's link port
+(Game Boy side only for now). Images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build without the
+Switch side. Either file is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**: store them again
+after flashing. Plug the board in through its **native USB port** (the one that shows up as an Espressif USB Serial/JTAG
+device) and use one of these:
 
-**With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It
-flashes the firmware and then stores the 3DS key from your `aes_keys.txt` in one go (either step can
-be done on its own): pick **Build for** (GB-Link or VC-Adapter board; the newest `.bin` of that build beside it is filled
-in, and it asks before flashing an image of the other build), your `aes_keys.txt` and the board, and press Start. Only the one
-16-byte key the board needs (slot 0x2D) is sent to it, and it is never shown or logged. It is built from this repository's
-`tools/` and needs nothing else installed.
+**With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It flashes the firmware and then stores the
+keys in one go (each step can be done on its own): pick **Build for** (GB-Link + Switch, firmware 1.8, or the VC-Adapter board,
+1.9; the newest `.bin` of that build beside it is filled in, and it asks before flashing an image of the other build), the 3DS
+key from your `aes_keys.txt`, the four Switch keys from your `prod.keys` (`aes_kek_generation_source`,
+`aes_key_generation_source`, `master_key_00`, `master_key_12`) that the Switch side needs, and the board, and press Start. Only
+those 16-byte keys are sent to the board (3DS slot 0x2D; the Switch keys in slots 0x80 to 0x83, which the firmware keeps where
+GB-Link Switch LDN's `ldn_keys.c` reads them), and they are never shown or logged. Firmware from before the ESP-IDF 6.1 port
+cannot keep the Switch keys, and the installer says so. It is built from this repository's `tools/` and needs nothing else
+installed.
 
 **In the browser (nothing to install).** Open Espressif's [esptool-js](https://espressif.github.io/esptool-js/)
 in Chrome or Edge (it needs Web Serial). Connect, pick the board's port, add the `.bin` at address
@@ -131,32 +171,40 @@ If the board is not detected, hold **BOOT** while plugging it in, then release i
 nothing after flashing; in Azahar's Network settings, **Connect** should report the firmware version.
 The merged file was verified by flashing it to a real ESP32-S3 with esptool and with esptool-js.
 
-To produce the merged files for a new release, run `package-release-bin.ps1` from an ESP-IDF PowerShell: it builds both
-(`-Board gblink` or `-Board vcadapter` for one), each in its own `build-<board>` folder, and writes them to the repository's
-`release/`. The build's name is also in the app's version (`1.8-vcadapter`), which uds-esp32-setup reads, and the firmware says
+To produce the merged files for a new release, run `package-release-bin.ps1` with ESP-IDF 6.1 set up (see below): it builds
+both profiles (`-Profile 1` or `-Profile 2` for one), each in its own `build-<profile>` folder, and writes them to the
+repository's `release/`. The build's name is also in the app's version (`1.9-vcadapter`), which uds-esp32-setup reads, and the firmware says
 it in HELLO_ACK's features byte (1.8 on).
 
 ## Build and flash
 
-Requires ESP-IDF 5.2 or newer (`idf.py`).
+Releases are built with **ESP-IDF v6.1** at commit `fff9895c82d744c7237be8847347bdd1b07c6643`, the one GB-Link Switch LDN pins
+(the build checks it, and the Wi-Fi driver library's hash, whenever the Switch side is in). In PowerShell, set it up, then build
+both release images:
 
 ```
+. <ESP-IDF v6.1>\export.ps1
 cd firmware/esp32-uds-bridge
-idf.py set-target esp32s3
-idf.py build
-idf.py -p COMx flash        # COMx = the board's port on your PC
+.\package-release-bin.ps1               # both profiles into ../../release
+.\package-release-bin.ps1 -Profile 1    # firmware 1.8 only: esp32-uds-bridge-fw1.8-esp32s3-gblink.bin
+.\package-release-bin.ps1 -Profile 2    # firmware 1.9 only: esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin
 ```
 
-That builds the GB-Link build (`sdkconfig.defaults`). The VC-Adapter board build, in a folder of its own:
+Or by hand with `idf.py`, each profile in a folder of its own:
 
 ```
+idf.py -B build-gblink -D SDKCONFIG=build-gblink/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" build
 idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.vcadapter" build
-idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -p COMx flash
+idf.py -B build-gblink -D SDKCONFIG=build-gblink/sdkconfig -p COMx flash        # COMx = the board's port on your PC
 ```
 
-Flash it over the same native USB port (hold BOOT while plugging in if the port is not detected).
-The firmware prints nothing: the USB port carries the binary protocol below, and `sdkconfig.defaults`
-turns the console off.
+A folder's `sdkconfig` is made from the defaults the first time only: after changing a profile file, delete the folder (or its
+`sdkconfig`). ESP-IDF 5.2.8 still builds the 3DS side alone (no Switch side, firmware 1.8 numbering), for development.
+
+Flash over the same native USB port (hold BOOT while plugging in if the port is not detected). Nothing is printed to the port
+as text in 3DS mode: it carries the binary protocol below, and ESP-IDF's own log (Wi-Fi's included) reaches the host as LOG
+frames (`main/diag.c`), with memory and reset figures at boot, on HELLO and around Wi-Fi start. Switch mode keeps GB-Link Switch
+LDN's text console free of it.
 
 ## Host tests
 
@@ -199,7 +247,7 @@ runs, the raw radio commands are refused (`ESP_ERR_INVALID_STATE`) and received 
 | `0x0A` SET_KEY | `slot:u8 (0x2D), key[16]` | STATUS. Stored in flash (NVS), never sent back. `idf.py flash` leaves it; a release image written at 0x0 erases it |
 | `0x0B` KEY_STATUS | none | `0x88` KEY_INFO `{slot, present}` |
 | `0x0C` ERASE_KEYS | none | STATUS |
-| `0x10` GB_START | `flags:u8 (bit 0: log, bit 1: Pico, bit 2: detect the generation, bit 3 (1.8): the board's own link port), title[16] (cartridge header at 0x134), name[20] (UTF-16LE)` | STATUS: 0, `0x105` no key stored, `0x106` unknown game, `0x103` no link port built in |
+| `0x10` GB_START | `flags:u8 (bit 0: log, bit 1: Pico, bit 2: detect the generation, bit 3 (1.9): the board's own link port), title[16] (cartridge header at 0x134), name[20] (UTF-16LE)` | STATUS: 0, `0x105` no key stored, `0x106` unknown game, `0x103` no link port built in |
 | `0x11` GB_XFER | `master:u8`, the byte the cartridge clocked out | `0x91` GB_REPLY `{slave:u8, wire phase:u8}`, the byte shifted back in the same transfer |
 | `0x12` GB_STOP | none | STATUS (STOP does the same while the wrapper runs) |
 | `0x13` GB_PICO | a frame of the GB-Link Pico's protocol, from the Pico (1.6) | none |
@@ -263,6 +311,12 @@ join directions (Azahar hosting and Azahar joining) and trading data work. That 
 hardware ACK generation and delivery of frames addressed to the board's own MAC are mutually
 exclusive on this chip, hence the twin-MAC design above. Still untested: Android (USB permission,
 the app's JNI link), and long sessions.
+
+Firmware 1.8 and 1.9 on hardware (2026-10-18, a XIAO ESP32-S3): through a real GB-Link and `uds-gblink-relay`, and with
+mGBA standing in for the GB-Link, Pokemon Red traded with Virtual Console Blue; with mGBA's Switch backend, a Gen 3 trade went
+through the Switch side; the board went 3DS -> Switch -> 3DS -> Switch on one power-up. On the VC-Adapter board build (a
+breadboard: BOB-12009 shifter, GBA link plug), retail Red traded with VC Blue through the link port, with the relay and on its
+own. Not yet tried: a Gen 2 cartridge through the link port, a battery-powered board, and the VC-Adapter PCB itself.
 
 Things to look at first if something misbehaves:
 

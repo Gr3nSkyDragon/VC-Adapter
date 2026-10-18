@@ -17,7 +17,7 @@
  * (MGBA_VCLINK_GEN=auto). 1.7 also had an optional GB-Link wired to the UART, with which the board started on its own; 1.8 dropped
  * it.
  *
- * Firmware 1.8 adds the link port (CONFIG_UDS_LINK_PORT, linkport.h): no GB-Link at all, a GBA/GBC link port wired to this board's
+ * Firmware 1.9 (the VC-Adapter board build) adds the link port (CONFIG_UDS_LINK_PORT, linkport.h): no GB-Link at all, a GBA/GBC link port wired to this board's
  * GPIOs through a level shifter, the board clocking it as the Pico would. It starts on its own when no host has said HELLO since it
  * powered up, or from a host's GB_START with UDS_GB_START_PORT (uds-gblink-relay --port), which gets the log.
  *

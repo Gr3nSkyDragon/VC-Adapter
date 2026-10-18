@@ -1,6 +1,7 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version. */
 #include "uds_wire.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 uint32_t uds_crc32(const uint8_t *data, size_t length)
@@ -69,7 +70,10 @@ static int cobs_decode(const uint8_t *input, size_t length, uint8_t *out, size_t
 size_t uds_wire_encode(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *payload,
                        size_t length, uint8_t *out, size_t capacity)
 {
-    static uint8_t raw[UDS_WIRE_MAX_RAW]; /* callers serialize encodes with their own lock */
+    /* Callers serialize encodes with their own lock. From the heap on first use, so that firmware that never encodes (GB-Link
+     * Switch LDN's mode, bridge_mode.h) does not carry it. */
+    static uint8_t *raw;
+    if (!raw && !(raw = malloc(UDS_WIRE_MAX_RAW))) return 0;
     if (length > UDS_WIRE_MAX_PAYLOAD) return 0;
     raw[0] = UDS_WIRE_VERSION;
     raw[1] = type;
