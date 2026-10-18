@@ -19,3 +19,6 @@ config UDS_PICO_LINK_RX_GPIO
     default 1
 
 endmenu
+
+# GB-Link Switch LDN's options (the Switch side, ldn/). Its zstd component reads PIA_ZSTD_LITERAL_BUFFER from here.
+rsource "../ldn/Kconfig.projbuild"

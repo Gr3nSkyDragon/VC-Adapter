@@ -3,16 +3,23 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
-# The USB Serial/JTAG port carries the binary protocol, so nothing may print to it.
-CONFIG_ESP_CONSOLE_NONE=y
+# The console is the native USB port, as GB-Link Switch LDN's text console needs. Nothing is logged, so in 3DS mode the
+# port carries only the binary protocol.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+# Messages up to INFO are compiled in, but the default level stays NONE: only the 3DS side raises it, and sends the log to the host
+# as LOG frames (main/diag.c). GB-Link Switch LDN's mode keeps its console free of them.
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
-# Raw injection and capture: keep Wi-Fi buffers in RAM and generous.
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
-CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
-CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# Wi-Fi buffers: ESP-IDF's defaults, as GB-Link Switch LDN's side is built with. The 3DS side asks for more, and no
+# aggregation, when it starts Wi-Fi (radio.c, init_wifi_once).
+# A 3 MB app slot for both sides (partitions.csv); NVS stays at 0x9000.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # The Game Boy wrapper decrypts every frame in software (AES-CCM): build for speed.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# GB-Link Switch LDN's side (as its own sdkconfig.defaults): it runs on the main task, and hosting a room starts an access
+# point with static DHCP entries.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_LWIP_DHCPS_STATIC_ENTRIES=y

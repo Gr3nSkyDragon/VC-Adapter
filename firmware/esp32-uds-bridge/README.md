@@ -17,6 +17,26 @@ authentication/association handshake, beacons' contents and everything else stay
 | Beacon cadence | Azahar hands over a beacon template; the board sends it every 102.4 ms with a fresh timestamp and sequence number, so USB jitter never shows up as a missing beacon. |
 | Channel | Azahar drives discovery hopping (1, 6, 11) and channel selection with `SET_CHANNEL`, exactly like the desktop monitor. |
 
+## Two modes: 3DS and Switch (ESP-IDF 6.1 builds)
+
+Built with ESP-IDF 6.1 (the version GB-Link Switch LDN pins), the firmware also carries GB-Link Switch LDN's bridge
+(`ldn/`, AGPL-3.0, see its README): the board can join or host a Switch's local wireless room for a GBA game, as GB-Link's
+own firmware does. The two sides cannot share the radio, so the board runs one at a time (`main/bridge_mode.c`):
+
+- **3DS mode**: everything described here.
+- **Switch mode** (the default): GB-Link Switch LDN's bridge, unchanged: its text console, `LDN_BINARY` framing and
+  commands, for mGBA's Switch backend, GB-Link's web client or a GB-Link.
+
+The host picks the mode by talking to the board. In 3DS mode, GB-Link's console (`LDN_...`, before any frame of this
+protocol) restarts the board in Switch mode; in Switch mode, this protocol's HELLO (before the console is in binary mode)
+restarts it in 3DS mode. The host's first attempt then fails while the board restarts, and its next attempt finds the right
+mode (mGBA's Switch backend retries about every 12 s). The mode is kept in NVS, so the board comes back in the last one
+used. After three crashes in a row in one mode (panic or watchdog resets), the board stores and boots the other, so a mode
+that cannot start never holds it in a reset loop. RAM is shared between the modes: the 3DS side's large buffers come from the
+heap when it starts, so Switch mode has as much free RAM as GB-Link's own firmware, and in 3DS mode the Switch side's static
+data (one block, `components/ldn_bridge/linker.lf`) is handed to the heap. The Switch keys it needs are stored by uds-esp32-setup (below). Built
+with ESP-IDF 5.x, the firmware has the 3DS mode only.
+
 ## Hardware
 
 Any ESP32-S3 board. **Use the chip's native USB port** (the one wired to GPIO19/20, usually labelled

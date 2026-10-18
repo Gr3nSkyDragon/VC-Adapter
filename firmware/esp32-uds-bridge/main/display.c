@@ -1,6 +1,7 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version. */
 #include "display.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -66,8 +67,10 @@ static const size_t kPowerLength[] = {6, 6, 2};
 static i2c_master_dev_handle_t s_panel;
 static display_status_t s_status;
 static volatile uint32_t s_wakes;
-static uint8_t s_frame[1 + SCREEN_BYTES] = {0x40}; /* control byte: data follows */
-static uint8_t s_shown[SCREEN_BYTES];
+/* From the heap once a screen is found (display_start), so that a board without one, or in GB-Link Switch LDN's mode
+ * (bridge_mode.h), does not carry them. */
+static uint8_t *s_frame; /* 1 + SCREEN_BYTES: the control byte 0x40 (data follows), then the picture */
+static uint8_t *s_shown; /* SCREEN_BYTES */
 
 static void display_task(void *arg)
 {
@@ -89,7 +92,7 @@ static void display_task(void *arg)
 
         if (want != SCENE_OFF && (!shown || memcmp(s_shown, s_frame + 1, SCREEN_BYTES))) {
             if (i2c_master_transmit(s_panel, kWindow, sizeof(kWindow), 50) == ESP_OK &&
-                i2c_master_transmit(s_panel, s_frame, sizeof(s_frame), 100) == ESP_OK) {
+                i2c_master_transmit(s_panel, s_frame, 1 + SCREEN_BYTES, 100) == ESP_OK) {
                 memcpy(s_shown, s_frame + 1, SCREEN_BYTES);
                 shown = true;
             } else {
@@ -139,6 +142,10 @@ bool display_start(display_status_t status)
     };
     gpio_config(&boot);
 
+    s_frame = calloc(1, 1 + SCREEN_BYTES);
+    s_shown = calloc(1, SCREEN_BYTES);
+    if (!s_frame || !s_shown) return false;
+    s_frame[0] = 0x40;
     s_status = status;
     xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 1, NULL, configNUMBER_OF_CORES - 1);
     return true;

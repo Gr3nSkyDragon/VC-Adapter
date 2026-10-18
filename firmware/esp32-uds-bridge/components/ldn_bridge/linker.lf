@@ -1,0 +1,8 @@
+# All of GB-Link Switch LDN's static data in one block, between _ldn_bridge_bss_start and _ldn_bridge_bss_end. Its code only runs
+# when the board boots in Switch LDN mode; in 3DS mode the block is handed to the heap (main/bridge_mode.c,
+# bridge_mode_reclaim_ldn_ram), which the 3DS side needs.
+[mapping:ldn_bridge]
+archive: libldn_bridge.a
+entries:
+    * (default);
+        bss->dram0_bss SURROUND(ldn_bridge_bss)

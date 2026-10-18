@@ -33,11 +33,21 @@ enum UDSFlashCommand {
 	UDS_FLASH_DATA = 0x03,
 	UDS_FLASH_END = 0x04,
 	UDS_FLASH_SYNC = 0x08,
+	UDS_FLASH_WRITE_REG = 0x09,
 	UDS_FLASH_READ_REG = 0x0A,
 	UDS_FLASH_SPI_SET_PARAMS = 0x0B,
 	UDS_FLASH_SPI_ATTACH = 0x0D,
 	UDS_FLASH_SPI_MD5 = 0x13,
 };
+
+// The ESP32-S3's RTC watchdog and super watchdog (RTC_CNTL), as esptool's ESP32S3ROM disables them over the native USB port.
+#define UDS_FLASH_RTC_WDT_CONFIG0 0x60008098u
+#define UDS_FLASH_RTC_WDT_PROTECT 0x600080B0u
+#define UDS_FLASH_RTC_WDT_KEY 0x50D83AA1u
+#define UDS_FLASH_SWD_CONF 0x600080B4u
+#define UDS_FLASH_SWD_AUTO_FEED (1u << 31)
+#define UDS_FLASH_SWD_PROTECT 0x600080B8u
+#define UDS_FLASH_SWD_KEY 0x8F1D312Au
 
 struct UDSFlashPort {
 	void* context;

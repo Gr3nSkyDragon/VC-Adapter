@@ -5,6 +5,7 @@
  * Nintendo 3DS local wireless (UDS).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/usb_serial_jtag.h"
@@ -14,6 +15,8 @@
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "bridge_mode.h"
+#include "diag.h"
 #include "display.h"
 #include "gbwrap.h"
 #include "keys.h"
@@ -25,10 +28,19 @@
 #define PROTOCOL_VERSION UDS_WIRE_VERSION
 #define RX_RING_BYTES (48 * 1024)
 #define STATS_INTERVAL_US (5 * 1000 * 1000)
+/* The Switch side's "LDN_" moves the board to Switch LDN mode only while no 3DS host is talking: before the first valid frame since
+ * boot, and again once valid frames have stopped for this long. Opening the port does not reset the board, so without the second case
+ * a board that had served a 3DS host stayed in this mode until it was power cycled. A 3DS session sends frames all the time (transfers,
+ * Pico frames, radio frames), so its bytes are never mistaken for a Switch host's; GB-Link Switch LDN's clients retry about every
+ * 12 s, long after this. */
+#define MODE_WATCH_QUIET_US (2 * 1000 * 1000)
 
 static RingbufHandle_t s_rx_ring;
 static SemaphoreHandle_t s_write_lock;
-static uint8_t s_encoded[UDS_WIRE_MAX_ENCODED];
+/* The 3DS side's buffers come from the heap when it starts (app_main), so that a board in GB-Link Switch LDN's mode
+ * (bridge_mode.h) does not carry them. */
+static uint8_t *s_encoded;    /* UDS_WIRE_MAX_ENCODED */
+static uint8_t *s_event_item; /* 1 + UDS_WIRE_MAX_PAYLOAD */
 static volatile bool s_host_seen;
 
 /* Serialized writer: the command task and the RX forwarder both send frames. */
@@ -36,7 +48,7 @@ static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *
                        size_t length)
 {
     xSemaphoreTake(s_write_lock, portMAX_DELAY);
-    size_t encoded = uds_wire_encode(type, seq, flags, payload, length, s_encoded, sizeof(s_encoded));
+    size_t encoded = uds_wire_encode(type, seq, flags, payload, length, s_encoded, UDS_WIRE_MAX_ENCODED);
     size_t sent = 0;
     while (encoded && sent < encoded) {
         int written = usb_serial_jtag_write_bytes(s_encoded + sent, encoded - sent, pdMS_TO_TICKS(100));
@@ -71,11 +83,23 @@ static bool event_sink(uint8_t type, const uint8_t *payload, size_t length)
     if (gbwrap_active()) {
         return type == UDS_EVT_RX ? gbwrap_sink_rx(payload, length) : true;
     }
-    static uint8_t item[1 + UDS_WIRE_MAX_PAYLOAD];
+    uint8_t *item = s_event_item;
     if (length > UDS_WIRE_MAX_PAYLOAD) return false;
     item[0] = type;
     memcpy(item + 1, payload, length);
     return xRingbufferSend(s_rx_ring, item, 1 + length, 0) == pdTRUE;
+}
+
+/* diag.h's queue: a log line as a LOG frame, through the same ring and task as the radio's events, so whichever task logs never waits
+ * on the USB port or its lock. A full ring drops the line. */
+static void queue_log(const char *text, size_t length)
+{
+    uint8_t item[1 + 200];
+    if (!s_rx_ring) return;
+    if (length > sizeof(item) - 1) length = sizeof(item) - 1;
+    item[0] = UDS_EVT_LOG;
+    memcpy(item + 1, text, length);
+    xRingbufferSend(s_rx_ring, item, 1 + length, 0);
 }
 
 static void rx_forward_task(void *arg)
@@ -188,6 +212,7 @@ static void handle_command(uds_wire_frame_t *frame)
         s_host_seen = true;
         gbwrap_host_hello(); /* a wrapper the board started on its own (a GB-Link on the UART) gives the board to the host */
         display_wake();
+        diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[9] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
@@ -226,10 +251,29 @@ static void handle_command(uds_wire_frame_t *frame)
     send_status(frame->type, frame->seq, (int32_t)result);
 }
 
+#if UDS_HAVE_LDN
+void ldn_app_main(void); /* ldn/ldn_probe.c: GB-Link Switch LDN's bridge; does not return */
+#endif
+
 void app_main(void)
 {
+    keys_init(); /* NVS, which also holds the boot mode */
+#if UDS_HAVE_LDN
+    if (bridge_mode_get() == BRIDGE_MODE_LDN) {
+        ldn_app_main();
+        return;
+    }
+    /* The Switch side's static data is idle in this mode: it becomes heap for this side's buffers and Wi-Fi. */
+    esp_err_t reclaim_result;
+    const size_t reclaimed = bridge_mode_reclaim_ldn_ram(&reclaim_result);
+    diag_set_reclaimed(reclaimed, reclaim_result);
+#endif
     s_write_lock = xSemaphoreCreateMutex();
     s_rx_ring = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+    s_encoded = malloc(UDS_WIRE_MAX_ENCODED);
+    s_event_item = malloc(1 + UDS_WIRE_MAX_PAYLOAD);
+    uds_wire_decoder_t *decoder = malloc(sizeof(*decoder));
+    configASSERT(s_encoded && s_event_item && decoder);
 
     usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     usb_config.rx_buffer_size = 16384;
@@ -241,7 +285,10 @@ void app_main(void)
     const uint8_t delimiter = 0;
     usb_serial_jtag_write_bytes(&delimiter, 1, pdMS_TO_TICKS(50));
 
-    keys_init();
+    /* From here ESP-IDF's log (Wi-Fi's included) reaches the host as LOG frames, never as text on the port (diag.h). */
+    diag_start(queue_log);
+    diag_report("boot");
+
     radio_init(event_sink);
     gbwrap_init(gbwrap_send);
     display_start(display_status); /* optional: without a screen this does nothing */
@@ -249,14 +296,20 @@ void app_main(void)
     xTaskCreate(rx_forward_task, "rx_fwd", 4096, NULL, 6, NULL);
     xTaskCreate(stats_task, "stats", 3072, NULL, 2, NULL);
 
-    static uds_wire_decoder_t decoder;
-    uds_wire_decoder_init(&decoder);
+    uds_wire_decoder_init(decoder);
     uint8_t chunk[256];
+    int64_t last_frame_us = 0; /* when the last valid 3DS host frame came; 0: none since boot */
     for (;;) {
         int count = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(20));
+        if (count > 0 && (!last_frame_us || esp_timer_get_time() - last_frame_us >= MODE_WATCH_QUIET_US)) {
+            bridge_mode_watch_uds(chunk, (size_t)count);
+        }
         for (int i = 0; i < count; ++i) {
             uds_wire_frame_t frame;
-            if (uds_wire_feed(&decoder, chunk[i], &frame)) handle_command(&frame);
+            if (uds_wire_feed(decoder, chunk[i], &frame)) {
+                last_frame_us = esp_timer_get_time();
+                handle_command(&frame);
+            }
         }
     }
 }

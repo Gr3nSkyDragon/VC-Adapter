@@ -324,6 +324,33 @@ static bool _command(struct Loader* loader, uint8_t command, const uint8_t* data
 	}
 }
 
+static bool _readReg(struct Loader* loader, uint32_t address, uint32_t* value) {
+	uint8_t data[4];
+	_put32(data, address);
+	return _command(loader, UDS_FLASH_READ_REG, data, sizeof(data), 0, COMMAND_MS, 0, value, NULL, 0);
+}
+
+static bool _writeReg(struct Loader* loader, uint32_t address, uint32_t value) {
+	uint8_t data[16];
+	_put32(&data[0], address);
+	_put32(&data[4], value);
+	_put32(&data[8], 0xFFFFFFFFu); // mask: the whole word
+	_put32(&data[12], 0); // no delay
+	return _command(loader, UDS_FLASH_WRITE_REG, data, sizeof(data), 0, COMMAND_MS, 0, NULL, NULL, 0);
+}
+
+// esptool's ESP32S3ROM.disable_watchdogs. Over the native USB port the reset into the ROM loader does not stop the RTC watchdog or
+// the super watchdog: one a crashing app left running (its panic handler arms the RTC watchdog) resets the chip partway through the
+// write, and the port goes with it. The RTC watchdog is turned off and the super watchdog set to feed itself, each register behind
+// its write-protect key.
+static bool _disableWatchdogs(struct Loader* loader) {
+	uint32_t swd = 0;
+	return _writeReg(loader, UDS_FLASH_RTC_WDT_PROTECT, UDS_FLASH_RTC_WDT_KEY) && _writeReg(loader, UDS_FLASH_RTC_WDT_CONFIG0, 0) &&
+	       _writeReg(loader, UDS_FLASH_RTC_WDT_PROTECT, 0) && _writeReg(loader, UDS_FLASH_SWD_PROTECT, UDS_FLASH_SWD_KEY) &&
+	       _readReg(loader, UDS_FLASH_SWD_CONF, &swd) && _writeReg(loader, UDS_FLASH_SWD_CONF, swd | UDS_FLASH_SWD_AUTO_FEED) &&
+	       _writeReg(loader, UDS_FLASH_SWD_PROTECT, 0);
+}
+
 static bool _sync(struct Loader* loader) {
 	uint8_t data[36] = {0x07, 0x07, 0x12, 0x20};
 	memset(&data[4], 0x55, 32);
@@ -481,6 +508,9 @@ bool udsFlashWriteImage(const struct UDSFlashPort* port, const struct UDSFlashHa
 		goto done;
 	}
 	_log(loader, "Found an ESP32-S3");
+	if (options && options->usbJtag && !_disableWatchdogs(loader)) {
+		goto done;
+	}
 
 	memset(data, 0, 8); // SPI_ATTACH: the default SPI pins
 	if (!_command(loader, UDS_FLASH_SPI_ATTACH, data, 8, 0, COMMAND_MS, 0, NULL, NULL, 0)) {

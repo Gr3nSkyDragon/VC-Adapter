@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "driver/uart.h"
+#include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -123,7 +124,14 @@ static struct {
 } s_air;
 
 static struct UDSRoom s_room;
-static struct UDSSession s_session;
+/* The session and the large scratch buffers come from the heap when the 3DS side starts (gbwrap_init), so that a board running
+ * GB-Link Switch LDN's side (bridge_mode.h) does not carry them. */
+static struct UDSSession *s_session;
+static struct {
+    uint8_t datagram[UDS_BRIDGE_MAX_DATAGRAM]; /* air_deliver: only the wrapper task delivers, and never re-entrantly */
+    uint8_t plain[UDS_BRIDGE_MAX_DATAGRAM];    /* air_receive */
+    uint8_t frame[UDS_BRIDGE_MAX_DATAGRAM + UDS_DATA_OVERHEAD]; /* air_send */
+} *s_buffers;
 static bool s_session_active;
 static uint32_t s_leave_start_ms;
 static bool s_leave_resent;
@@ -257,8 +265,8 @@ static void air_deliver(uint8_t type, uint8_t channel, const uint8_t *transmitte
     memcpy(packet.destination, destination, 6);
     packet.data = data;
     packet.size = size;
-    static uint8_t datagram[UDS_BRIDGE_MAX_DATAGRAM]; /* only the wrapper task delivers, and never re-entrantly */
-    size_t length = udsRoomEncode(datagram, sizeof(datagram), &packet);
+    uint8_t *datagram = s_buffers->datagram;
+    size_t length = udsRoomEncode(datagram, sizeof(s_buffers->datagram), &packet);
     if (length) {
         ++s_air.frames_received;
         room_receive(datagram, length);
@@ -378,10 +386,10 @@ static void air_rx(const uint8_t *event, size_t event_length)
         return;
     }
     if (type == 2 && (frame_control & 0x4000)) { /* protected data */
-        static uint8_t plain[UDS_BRIDGE_MAX_DATAGRAM];
+        uint8_t *plain = s_buffers->plain;
         size_t plain_length = 0;
         struct UDSDataFrameInfo info;
-        if (length > sizeof(plain) + UDS_DATA_OVERHEAD) {
+        if (length > sizeof(s_buffers->plain) + UDS_DATA_OVERHEAD) {
             ++s_air.dropped_other;
             return;
         }
@@ -447,8 +455,8 @@ static void air_send(const uint8_t *datagram, size_t size)
         return;
     }
     if (packet.type == UDS_PACKET_DATA && s_air.have_host) {
-        static uint8_t frame[UDS_BRIDGE_MAX_DATAGRAM + UDS_DATA_OVERHEAD];
-        size_t length = udsBuildDataFrame(frame, sizeof(frame), s_air.data_key, packet.data, packet.size, s_mac, s_air.host.mac,
+        uint8_t *frame = s_buffers->frame;
+        size_t length = udsBuildDataFrame(frame, sizeof(s_buffers->frame), s_air.data_key, packet.data, packet.size, s_mac, s_air.host.mac,
                                           s_air.host.mac, UDS_DS_TO, s_air.tx_packet_number++, s_air.tx_sequence++);
         if (length) air_transmit(frame, length, CLIENT_DATA_RATE);
     }
@@ -471,7 +479,7 @@ static void session_send(void *context, const uint8_t *frame, size_t size)
 static void room_pia(void *context, const uint8_t *payload, size_t size)
 {
     (void)context;
-    if (s_session_active) udsSessionReceive(&s_session, s_now, payload, size);
+    if (s_session_active) udsSessionReceive(s_session, s_now, payload, size);
 }
 
 static void room_joined(void *context, const struct UDSRoomHost *host)
@@ -489,8 +497,8 @@ static void room_joined(void *context, const struct UDSRoomHost *host)
     config.profileRole = 0x06;
     config.gameRoleFlags[0] = 0x01;
     config.gameRoleFlags[1] = 0x01;
-    udsSessionInit(&s_session, &config, session_send, NULL);
-    udsSessionStart(&s_session, s_now);
+    udsSessionInit(s_session, &config, session_send, NULL);
+    udsSessionStart(s_session, s_now);
     s_session_active = true;
     logf_host("joined: node %u", (unsigned)host->nodeId);
 }
@@ -503,16 +511,16 @@ static void room_receive(const uint8_t *datagram, size_t size)
 static void joiner_poll(void)
 {
     udsRoomPoll(&s_room, s_now);
-    if (udsWireGeneration(&s_wire) == 2 && s_session_active && s_session.hostLeaving) {
+    if (udsWireGeneration(&s_wire) == 2 && s_session_active && s_session->hostLeaving) {
         /* The host's game is leaving the room. Its VC waits about five seconds for its partner's end-of-session record and then
          * closes the network: answer with ours (once more a moment later, in case the first is lost), then leave the network as a
          * 3DS joiner does. */
         if (!s_leave_start_ms) {
             s_leave_start_ms = s_now ? s_now : 1;
-            udsSessionSendLeave(&s_session, s_now);
+            udsSessionSendLeave(s_session, s_now);
         } else if (s_now - s_leave_start_ms >= LEAVE_RESEND_MS && !s_leave_resent) {
             s_leave_resent = true;
-            udsSessionSendLeave(&s_session, s_now);
+            udsSessionSendLeave(s_session, s_now);
         } else if (s_now - s_leave_start_ms >= LEAVE_DELAY_MS) {
             s_session_active = false;
             s_leave_start_ms = 0;
@@ -521,8 +529,8 @@ static void joiner_poll(void)
         }
     }
     if (s_session_active) {
-        udsSessionPoll(&s_session, s_now);
-        if (s_session.state == UDS_STATE_CLOSED) {
+        udsSessionPoll(s_session, s_now);
+        if (s_session->state == UDS_STATE_CLOSED) {
             s_session_active = false;
             s_room.state = UDS_ROOM_SCAN; /* the host is gone: wait for the next beacon */
             logf_host("the session closed: scanning");
@@ -535,37 +543,37 @@ static void joiner_poll(void)
 static bool port_ready(void *context)
 {
     (void)context;
-    return s_session_active && s_session.state == UDS_STATE_JOINED;
+    return s_session_active && s_session->state == UDS_STATE_JOINED;
 }
 
 static bool port_queue(void *context, uint8_t byte)
 {
     (void)context;
-    return udsSessionQueueUnit(&s_session, byte);
+    return udsSessionQueueUnit(s_session, byte);
 }
 
 static void port_flush(void *context)
 {
     (void)context;
-    udsSessionFlush(&s_session, s_now);
+    udsSessionFlush(s_session, s_now);
 }
 
 static bool port_pop(void *context, uint8_t *byte)
 {
     (void)context;
-    return udsSessionPopUnit(&s_session, byte);
+    return udsSessionPopUnit(s_session, byte);
 }
 
 static bool port_peek(void *context, uint8_t *byte)
 {
     (void)context;
-    return udsSessionPeekUnit(&s_session, byte);
+    return udsSessionPeekUnit(s_session, byte);
 }
 
 static size_t port_waiting(void *context)
 {
     (void)context;
-    return udsSessionUnitsWaiting(&s_session);
+    return udsSessionUnitsWaiting(s_session);
 }
 
 static void port_trace(void *context, const char *line)
@@ -782,7 +790,7 @@ static uint8_t stage(void)
     case UDS_ROOM_JOINED: break;
     }
     if (!s_session_active) return GBWRAP_JOINED;
-    switch (s_session.state) {
+    switch (s_session->state) {
     case UDS_STATE_IDLE:
     case UDS_STATE_SETUP: return GBWRAP_SETUP;
     case UDS_STATE_CLOSED: return GBWRAP_CLOSED;
@@ -819,7 +827,7 @@ static void report_state(void)
 {
     publish_status(true);
     if (!s_host) return; /* on its own the board has nobody to tell (a write with no host reading would hold the task) */
-    uint8_t state[5] = {(uint8_t)s_room.state, s_session_active ? (uint8_t)s_session.state : 0xFF, (uint8_t)s_wire.phase,
+    uint8_t state[5] = {(uint8_t)s_room.state, s_session_active ? (uint8_t)s_session->state : 0xFF, (uint8_t)s_wire.phase,
                         (uint8_t)udsWireGeneration(&s_wire), s_air.channel};
     if (memcmp(state, s_reported, sizeof(state))) {
         memcpy(s_reported, state, sizeof(state));
@@ -879,7 +887,7 @@ static bool service(void)
     if (pass_us > s_timing.max_pass_us) s_timing.max_pass_us = pass_us;
     if (pass_us > SLOW_PASS_US) {
         logf_host("slow pass: %lu ms (%u frames, room %d, session %d, wire phase %d)", (unsigned long)(pass_us / 1000), frames,
-                  (int)s_room.state, s_session_active ? (int)s_session.state : -1, (int)s_wire.phase);
+                  (int)s_room.state, s_session_active ? (int)s_session->state : -1, (int)s_wire.phase);
     }
     if (s_now - s_timing.last_report_ms >= STATS_MS) {
         s_timing.last_report_ms = s_now;
@@ -933,6 +941,7 @@ static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, 
     s_air.channel = kChannels[0];
     esp_err_t err = radio_start(s_air.channel, s_mac, true);
     if (err != ESP_OK) {
+        ESP_LOGE("gbwrap", "the wrapper cannot start: radio_start failed: %s", esp_err_to_name(err));
         memset(s_air.slot_key, 0, sizeof(s_air.slot_key));
         return err;
     }
@@ -941,7 +950,7 @@ static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, 
     udsRoomInit(&s_room, s_mac, s_name, room_send, room_joined, room_pia, NULL);
     s_room.wantCommId = COMM_ID;
     s_room.wantCommMask = COMM_MASK;
-    memset(&s_session, 0, sizeof(s_session));
+    memset(s_session, 0, sizeof(*s_session));
     s_session_active = false;
     s_leave_start_ms = 0;
     s_leave_resent = false;
@@ -1116,10 +1125,15 @@ static void uart_init(void)
 void gbwrap_init(gbwrap_send_t send)
 {
     s_send = send;
+    s_session = calloc(1, sizeof(*s_session));
+    s_buffers = calloc(1, sizeof(*s_buffers));
+    configASSERT(s_session && s_buffers);
     s_queue = xQueueCreate(QUEUE_LENGTH, sizeof(struct request));
     s_rx_ring = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
     uart_init();
-    xTaskCreate(gbwrap_task, "gbwrap", TASK_STACK, NULL, TASK_PRIORITY, NULL);
+    if (xTaskCreate(gbwrap_task, "gbwrap", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE("gbwrap", "no memory for the wrapper's task (%u byte stack): GB_START will go unanswered", (unsigned)TASK_STACK);
+    }
 }
 
 void gbwrap_host_hello(void)

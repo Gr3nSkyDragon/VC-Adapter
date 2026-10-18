@@ -1,0 +1,66 @@
+menu "LDN bridge"
+config LDN_PROBE_CHANNEL
+    int "Initial 2.4 GHz channel"
+    range 1 11
+    default 1
+config LDN_PROBE_PRIVATE_JOIN
+    bool
+    default y
+config LDN_PROBE_EXPORT_ADVERTISEMENTS
+    bool
+    default y
+config LDN_PROBE_CONTROL_PORT
+    bool
+    default y
+config LDN_PROBE_LEGACY_PHY
+    bool "Use 802.11b/g for LDN compatibility"
+    default y
+config PICO_LINK_TX_GPIO
+    int "GPIO wired to the GB-Link's GP9 (its UART RX)"
+    default 2
+config PICO_LINK_RX_GPIO
+    int "GPIO wired to the GB-Link's GP8 (its UART TX)"
+    default 1
+config PIA_STATIC_ZSTD_CONTEXT
+    bool "Reserve the decompression context at link time"
+    default y
+    help
+        40 KB of static data. Turn it off on a chip whose static data region is too small
+        (the original ESP32); the context then comes from the heap at the start of boot.
+config PIA_ZSTD_LITERAL_BUFFER
+    int "Decompression literal buffer, in bytes"
+    range 1024 65536
+    default 8192
+    help
+        Part of the decompression context, used only for literals that do not fit in
+        the destination. Pia's bodies are small enough that the 1 KB minimum works; each
+        KB less is a KB more heap.
+config BRIDGE_USB_RX_BUFFER
+    int "USB console receive buffer, in bytes"
+    default 32768
+    help
+        Heap for data from the web client or PC until the bridge reads it. The driver
+        drops what does not fit, so a smaller buffer only suits a board whose host sends
+        little at a time (the web client).
+config BRIDGE_USB_TX_BUFFER
+    int "USB console send buffer, in bytes"
+    default 8192
+config BRIDGE_WIFI_MAX_TX_POWER
+    int "Wi-Fi transmit power cap, in 0.25 dBm steps (0: the chip's own maximum)"
+    range 0 84
+    default 0
+    help
+        Some ESP32-C3 boards (the C3 SuperMini among them) send garbled frames at full
+        power: they hear the Switch's room but their join is never answered. The Switch
+        sits within a metre or two, so a low cap costs nothing.
+config BRIDGE_HOST_MAX_TX_POWER
+    int "Wi-Fi transmit power cap while hosting a room, in 0.25 dBm steps (0: none)"
+    range 0 84
+    default 60
+    help
+        Hosting sends the room's long advertisements ten times a second at the slowest
+        rate, so the radio draws its peak current for much longer than when joining a
+        room. On boards with a weak supply that dips the voltage until the brownout
+        detector resets the chip. The Switch sits within a metre or two, so 15 dBm is
+        plenty.
+endmenu
