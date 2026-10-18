@@ -27,7 +27,7 @@
  *   --esp32, --gblink   the ports; found by their USB vendor ids when left out (Espressif 303A; GB-Link 2FE3)
  *   --port              no GB-Link: the console is on the board's own link port
  *   --key               stores the 3DS UDS key (slot 0x2D) on the board if it has none (as uds-esp32-probe --store-key)
- *   --name              the name the 3DS is shown (default GB-Link)
+ *   --name              the name the 3DS is shown (default GB-Link; WRAPPER with --port, as the VC-Adapter board shows on its own)
  *   --trace             the board's log, every byte the board clocks, and the relay's own notes
  * Ctrl+C, or closing the window, stops the wrapper and takes the GB-Link out of Game Boy mode.
  *
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
 	const char* gbPort = NULL;
 	const char* keyPath = NULL;
 	const char* tracePath = NULL;
-	const char* name = "GB-Link";
+	const char* name = NULL; // the default depends on --port, below
 	bool linkPort = false;
 	int generation = 0;
 	int i;
@@ -206,6 +206,9 @@ int main(int argc, char** argv) {
 	}
 	if (linkPort && gbPort) {
 		return _usage();
+	}
+	if (!name) {
+		name = linkPort ? "WRAPPER" : "GB-Link";
 	}
 	if (tracePath) {
 		sTrace = fopen(tracePath, "w");

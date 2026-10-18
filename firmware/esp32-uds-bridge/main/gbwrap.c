@@ -49,7 +49,11 @@ static const struct gb_game kGames[] = {
  * its first sync (udsWireSetGeneration 0). */
 static const struct gb_game kCartridge = {"", false, "GB CARTRIDGE"};
 /* The name the 3DS is shown when no host gave one (the board on its own with a GB-Link). */
+#if CONFIG_UDS_LINK_PORT
+static const uint16_t kStandaloneName[UDS_NAME_WORDS] = {'W', 'R', 'A', 'P', 'P', 'E', 'R'}; /* the VC-Adapter board (1.9) */
+#else
 static const uint16_t kStandaloneName[UDS_NAME_WORDS] = {'G', 'B', '-', 'L', 'i', 'n', 'k'};
+#endif
 
 /* Every Game Boy Virtual Console Pokemon network: the comm id is the title id plus 0x10 (Red 00171010, Gold 00172610, Silver
  * 00172710), so the Gen 1 titles share 00171xxx and the Gen 2 ones 00172xxx. Both are accepted whatever the cartridge is: a Gen 2
