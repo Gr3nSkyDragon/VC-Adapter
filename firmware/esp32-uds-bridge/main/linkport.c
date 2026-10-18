@@ -12,8 +12,10 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_cpu.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 
 /* SI and SO are named from this board's side, as on the GB-Link. */
 #define PIN_SC CONFIG_UDS_LINK_PORT_SC_GPIO
@@ -21,7 +23,7 @@
 #define PIN_SI CONFIG_UDS_LINK_PORT_SI_GPIO /* this board's serial in: from the console's SO */
 #define PIN_SD CONFIG_UDS_LINK_PORT_SD_GPIO /* unused by a Game Boy's link: held as a plain input */
 #define PIN_SENSE CONFIG_UDS_LINK_PORT_SENSE_GPIO
-#define HALF_PERIOD_US CONFIG_UDS_LINK_PORT_HALF_PERIOD_US
+#define CLOCK_HZ CONFIG_UDS_LINK_PORT_CLOCK_HZ
 
 /* Two jobs on one GPIO would fight over it: menuconfig has to keep them apart. */
 #define PIN_IS_LINE(p) ((p) == PIN_SC || (p) == PIN_SO || (p) == PIN_SI)
@@ -33,12 +35,6 @@
 #endif
 #if PIN_SENSE >= 0 && (PIN_IS_LINE(PIN_SENSE) || PIN_SENSE == PIN_SD)
 #error "CONFIG_UDS_LINK_PORT: the sense pin shares a GPIO with SC, SI, SO or SD"
-#endif
-#if CONFIG_UDS_PICO_LINK
-#define PIN_IS_PICO(p) ((p) >= 0 && ((p) == CONFIG_UDS_PICO_LINK_TX_GPIO || (p) == CONFIG_UDS_PICO_LINK_RX_GPIO))
-#if PIN_IS_PICO(PIN_SC) || PIN_IS_PICO(PIN_SO) || PIN_IS_PICO(PIN_SI) || PIN_IS_PICO(PIN_SD) || PIN_IS_PICO(PIN_SENSE)
-#error "CONFIG_UDS_PICO_LINK and CONFIG_UDS_LINK_PORT share a GPIO (both default to GPIO1 and GPIO2): move one of them in menuconfig"
-#endif
 #endif
 
 /* How long linkport_clock_busy watches: a little more than one bit of a Game Boy's own 8192 Hz clock, so that a byte the other side
@@ -52,6 +48,8 @@
 #define SENSE_GB_MV 4100
 
 static bool s_enabled;
+static uint32_t s_half_cycles; /* half a clock period, in CPU cycles */
+static portMUX_TYPE s_byte_lock = portMUX_INITIALIZER_UNLOCKED;
 static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_cali;
 static adc_channel_t s_sense_channel;
@@ -76,7 +74,9 @@ static void sense_init(void)
 
 esp_err_t linkport_init(void)
 {
-    /* Open drain, released (high) from the start: the clock and this board's serial out. */
+    s_half_cycles = (uint32_t)((uint64_t)esp_rom_get_cpu_ticks_per_us() * 1000000u / (2u * CLOCK_HZ));
+    if (!s_half_cycles) s_half_cycles = 1;
+    /* Open drain, released (high) from the start and between bytes: the clock and this board's serial out. */
     const gpio_config_t outputs = {
         .pin_bit_mask = (1ULL << PIN_SC) | (1ULL << PIN_SO),
         .mode = GPIO_MODE_INPUT_OUTPUT_OD,
@@ -142,20 +142,40 @@ bool linkport_clock_busy(void)
     return false;
 }
 
+/* Spins until `cycles` after *mark, and moves *mark on: the edges keep their spacing whatever the GPIO calls cost. */
+static inline void wait_from(uint32_t *mark, uint32_t cycles)
+{
+    *mark += cycles;
+    while ((int32_t)((uint32_t)esp_cpu_get_cycle_count() - *mark) < 0) {
+    }
+}
+
 uint8_t linkport_exchange(uint8_t out)
 {
+    /* The byte goes out as the GB-Link's Pico sends one: fast, push-pull, in one piece. At 8192 Hz a byte took a millisecond, and a
+     * cartridge that re-armed its serial port in the middle of one (Pokemon re-arms in its serial interrupt, which waits behind the
+     * frame's other work) shifted only its tail and lost its place in every byte after: the first hardware run read the cartridge's
+     * FD padding rotated by a few bits (EF EF EF..., BF BF BF...) and the cartridge read ours the same way. A byte of a few tens of
+     * microseconds is either missed whole or taken whole. Interrupts are held off for it so that nothing stretches it, and the
+     * lines are driven both ways for crisp edges through the level shifter; between bytes they go back to open drain. */
+    gpio_set_direction(PIN_SC, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_direction(PIN_SO, GPIO_MODE_INPUT_OUTPUT);
     uint8_t in = 0;
+    portENTER_CRITICAL(&s_byte_lock);
+    uint32_t mark = (uint32_t)esp_cpu_get_cycle_count();
     for (int bit = 7; bit >= 0; --bit) {
-        /* Falling edge: both sides put their bit out. Each reads the other's before the rising edge. Being interrupted only stretches
-         * the clock, which a slave does not mind: it moves on edges, not on time. */
+        /* Falling edge: both sides put their bit out. Each reads the other's at the end of the low half, before the rising edge. */
         gpio_set_level(PIN_SC, 0);
         gpio_set_level(PIN_SO, (out >> bit) & 1);
-        esp_rom_delay_us(HALF_PERIOD_US);
+        wait_from(&mark, s_half_cycles);
         in = (uint8_t)((in << 1) | (gpio_get_level(PIN_SI) & 1));
         gpio_set_level(PIN_SC, 1);
-        esp_rom_delay_us(HALF_PERIOD_US);
+        wait_from(&mark, s_half_cycles);
     }
     gpio_set_level(PIN_SO, 1);
+    portEXIT_CRITICAL(&s_byte_lock);
+    gpio_set_direction(PIN_SC, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_direction(PIN_SO, GPIO_MODE_INPUT_OUTPUT_OD);
     return in;
 }
 

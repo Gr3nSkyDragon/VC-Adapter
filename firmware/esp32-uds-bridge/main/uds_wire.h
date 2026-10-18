@@ -53,7 +53,7 @@
 /* HELLO_ACK's features (1.8 on; older firmware sends 9 bytes, which means none): what this build was made with. The VC-Adapter
  * board profile has LINK_PORT, the GB-Link profile neither. */
 #define UDS_HELLO_FEATURE_LINK_PORT 0x01 /* CONFIG_UDS_LINK_PORT: the console's link port on this board's GPIOs */
-#define UDS_HELLO_FEATURE_PICO_UART 0x02 /* CONFIG_UDS_PICO_LINK: a GB-Link wired to this board's UART */
+#define UDS_HELLO_FEATURE_PICO_UART 0x02 /* reserved, never set: 1.7's optional GB-Link on the UART, dropped in 1.8 */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */
 #define UDS_EVT_LOG 0x84       /* {text...} */

@@ -14,12 +14,12 @@
  * Firmware 1.7 adds a real cartridge: GB_START's detect flag has the wrapper take the generation from the cartridge's first sync
  * (nobody can read its header; uds-wire.h, udsWireSetGeneration 0). The supported setup is the GB-Link and this board both on a PC's
  * USB, with mGBA's uds-gblink-relay carrying the Pico's frames between them in GB_PICO; mGBA can also stand in for such a cartridge
- * (MGBA_VCLINK_GEN=auto). Optional and off by default (CONFIG_UDS_PICO_LINK): a GB-Link wired to the UART, with which the board
- * starts on its own when there is no host; a host's HELLO takes the board back.
+ * (MGBA_VCLINK_GEN=auto). 1.7 also had an optional GB-Link wired to the UART, with which the board started on its own; 1.8 dropped
+ * it.
  *
  * Firmware 1.8 adds the link port (CONFIG_UDS_LINK_PORT, linkport.h): no GB-Link at all, a GBA/GBC link port wired to this board's
- * GPIOs through a level shifter, the board clocking it as the Pico would. It starts on its own as with a GB-Link on the UART, or from
- * a host's GB_START with UDS_GB_START_PORT (mGBA's uds-gblink-relay --port), which gets the log.
+ * GPIOs through a level shifter, the board clocking it as the Pico would. It starts on its own when no host has said HELLO since it
+ * powered up, or from a host's GB_START with UDS_GB_START_PORT (uds-gblink-relay --port), which gets the log.
  *
  * Everything between is the wrapper mGBA ran on the PC (src/gb/sio in the mgba_LDN repository), copied unchanged into gbwrap/: the
  * permanent slave (uds-wire.c, uds-cable.c), the Pia session (uds-session.c, uds-pia.c), the join (uds-room.c) and CCMP (uds-ccmp.c).

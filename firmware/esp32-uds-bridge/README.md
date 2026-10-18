@@ -51,8 +51,11 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
 
 The **VC-Adapter board build** (`esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
 `CONFIG_UDS_LINK_PORT`, menuconfig's UDS bridge > **Game Boy link port wired to GPIOs**) needs no GB-Link: a GBA (playing a GB/GBC cartridge), GBC or Game Boy link port is wired to four GPIOs through a level
-shifter, and the board clocks the cartridge itself, as the GB-Link's Pico did (8192 Hz, the board the master, the cartridge the
-slave; `main/linkport.c`). **Not yet run on hardware.**
+shifter, and the board clocks the cartridge itself, as the GB-Link's Pico did (the board the master, the cartridge the slave;
+`main/linkport.c`). Each byte goes out in one piece at 262144 Hz (`CONFIG_UDS_LINK_PORT_CLOCK_HZ`; the Pico clocks at about
+1 MHz), with the GB-Link's measured gaps between bytes (`CONFIG_UDS_LINK_PORT_PACE_US`). The first hardware run clocked at a Game
+Boy's own 8192 Hz, a millisecond a byte, and the cartridge lost its place in the bytes (they came back rotated by a few bits);
+the faster clock is the fix for that and has not been run on hardware yet.
 
 The port's signals are **5 V when a GBA runs a GB/GBC cartridge** (3.3 V for a GBA game). The ESP32's pins take 3.3 V only, so
 a level shifter is required: a 4-channel BSS138 module (the common "I2C-safe bidirectional logic level converter"). Power its
@@ -85,14 +88,12 @@ the board can tell nothing / a GBA game (3.3 V) / a Game Boy game (5 V) apart: i
 Boy game and stops 3 s after the console goes off. A 100 nF capacitor from the middle point to GND steadies the reading. Without
 the divider (`-1`, the default) the board assumes a Game Boy game is there.
 
-The defaults share GPIO1 and GPIO2 with the GB-Link UART mode's (`CONFIG_UDS_PICO_LINK`, taken from GB-Link's own ESP32 firmware);
-a build with both turned on stops with an error until one of them is moved.
+Between bytes the pins are open drain (the shifter's pull-ups make the high level), so a cartridge clocking a byte of its own
+never fights a driven high; before each byte the board watches the clock for one bit and lets such a byte finish. During a byte
+SC and SO are driven both ways, as the GB-Link's Pico drives them through the same BOB-12009 shifter. No resistors are needed
+(the GB-Link DIY has none).
 
-The pins are open drain (the shifter's pull-ups make the high level), so a cartridge clocking a byte of its own never fights a
-driven high; before each byte the board watches the clock for one bit and lets such a byte finish. A 330 Ω resistor in series
-with SC on the port side is cheap insurance all the same.
-
-With the 3DS key stored and no host on USB, the board runs the wrapper on its own (as with a GB-Link on the UART); with the
+With the 3DS key stored and no host on USB since it powered up, the board runs the wrapper on its own; with the
 optional sense divider it waits for a Game Boy's 5 V and stops when the console has been off for 3 s. To watch it from a PC,
 `uds-gblink-relay --port [--trace <file>]` (this repository's `tools/`) says HELLO, which takes the board back, and starts the wrapper with
 its log.
@@ -208,8 +209,8 @@ whose SPI only clocks, and the board drives the clock with the same rules mGBA's
 board speaks the Pico's own serial protocol (GB-Link GBLink-Firmware 2.2.7: `| 47 42 | channel | length:u16 LE | payload |`, channel
 0 commands, 1 data, 2 status) inside `0x93` GB_PICO frames to the host and GB_PICO commands from it: SetMode Game Boy (`00 02`)
 until the Pico reports `0xFF0A`, SetTimingConfig with no wait of its own (`30 00 00 00 01`), then one byte to clock per data frame,
-the byte the Pico shifted in coming back. mGBA's Wireless Adapter > ESP32 stands in for the Pico over USB; a real Pico on the board's
-UART takes the same frames. Without the flag the cartridge is the master, as in 1.4 and 1.5.
+the byte the Pico shifted in coming back. mGBA's Wireless Adapter > ESP32 stands in for the Pico over USB; a real GB-Link takes the same
+frames, carried by `uds-gblink-relay` (1.7). Without the flag the cartridge is the master, as in 1.4 and 1.5.
 
 Firmware 1.7 makes the GB-Link model work with a **real cartridge**. The supported setup has no wires between the boards: a
 GB-Link (GBLink-Firmware 2.2.7 or later) and this board both plug into a PC's USB, and mGBA's `uds-gblink-relay` carries the Pico's
@@ -228,9 +229,9 @@ official GB-Link sets the link port's voltage in software; the DIY board's SW1 m
 each byte is what is left of a 12.6 ms period after the measured round trip, so a relay's milliseconds through the PC do not make
 the clock miss a frame.
 
-Optional, off by default (`idf.py menuconfig` > UDS bridge): a GB-Link wired to the board's UART with three wires, as GB-Link's
-firmware also allows (UART 1 at 921600, GPIO2 to the Pico's GP9 and GPIO1 from its GP8). With it, and no host on USB, the board asks
-the UART for Game Boy mode once a second and starts the wrapper on its own when a Pico answers; a host's HELLO takes the board back.
+Firmware 1.7 also had an optional mode, off by default, for a GB-Link wired to the board's UART (as GB-Link's own ESP32 firmware
+allows), with which the board started on its own. 1.8 dropped it: the board starts on its own only on its link port, and a GB-Link
+goes through the PC with `uds-gblink-relay`.
 
 While the wrapper runs the board also sends `0x90` GB_STATE `{room, session, wire phase, generation, channel}` on every change,
 `0x92` GB_STATS (10 × u32: beacons, frames sent and received, frames dropped for decryption, replay and other reasons, tx failures,

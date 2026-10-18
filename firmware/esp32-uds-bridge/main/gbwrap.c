@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/uart.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -87,7 +86,6 @@ struct request {
     uint8_t data[72]; /* GB_START's 37, or a Pico frame (5 + up to 64) */
 };
 /* Requests of the board's own, beside the host's commands (uds_wire.h). */
-#define GBWRAP_REQ_UART 0xF0 /* bytes the Pico sent on the UART */
 #define GBWRAP_REQ_HOST 0xF1 /* a host said HELLO */
 
 static gbwrap_send_t s_send;
@@ -140,23 +138,15 @@ enum front { FRONT_XFER, FRONT_PICO };
 static uint8_t s_front;
 static struct UDSClock s_clock;
 
-/* Where the Pico is. USB: the host stands in for it (mGBA), its frames inside GB_PICO. UART: a GB-Link wired to this board, as
- * GB-Link's own ESP32 firmware has it (firmware/common/pico_link.c: UART 1 at 921600, its S3 build on GPIO2 to the Pico's GP9 and
- * GPIO1 from its GP8; the Pico's bridge UART is uart1, GP8 TX, GP9 RX). With nothing on USB the board starts on its own: it asks
- * the UART for Game Boy mode now and then, and a Pico that answers starts the wrapper (start_standalone). A host's HELLO ends that
- * and stops a wrapper running so, so that the host has the board. */
-#define PICO_UART UART_NUM_1
-#define PICO_UART_BAUD 921600
-#define PICO_PROBE_US 1000000
+/* Where the Pico is. HOST: the host stands in for it (mGBA), or carries a real GB-Link's frames (uds-gblink-relay), inside GB_PICO.
+ * PORT: there is no Pico; the board clocks its own link port. With nothing on USB the board starts on its own on the link port
+ * (probe_port); a host's HELLO ends that and stops a wrapper running so, so that the host has the board. (Firmware 1.7 could also
+ * start on its own with a GB-Link wired to its UART, as GB-Link's own ESP32 firmware has it; 1.8 dropped that.) */
 enum pico_at {
     PICO_AT_HOST, /* the host stands in for it, inside GB_PICO */
-    PICO_AT_UART, /* a GB-Link on the UART */
     PICO_AT_PORT, /* no Pico: the link port on this board's GPIOs (CONFIG_UDS_LINK_PORT) */
 };
 static uint8_t s_pico_at;    /* where the running wrapper's Pico is */
-static bool s_uart_ok;       /* the UART is set up (CONFIG_UDS_PICO_LINK) */
-static bool s_feeding_uart;  /* pico_frame: the frame came from the UART */
-static int64_t s_probe_us;
 
 #define PICO_SYNC0 0x47 /* 'G' */
 #define PICO_SYNC1 0x42 /* 'B' */
@@ -174,8 +164,8 @@ static int64_t s_probe_us;
 #define PICO_REPLY_TIMEOUT_US 250000
 /* The waits after an exchange (uds-clock.h), in real time. mGBA's Local mode, where these were tested, counts them in emulated
  * cycles (105336, 8389 and 4194 at 8388608 a second: 12.6 ms, 1 ms, 0.5 ms) and adds 75 us for the UART; here the round trip to the
- * Pico comes on top, and it differs by transport: microseconds on a UART, a few milliseconds through a PC that relays both USB ports
- * (uds-gblink-relay), where each byte crosses USB four times. In idle, sync and menu the clock must reach the cartridge in every frame
+ * Pico comes on top: a few milliseconds through a PC that relays both USB ports (uds-gblink-relay), where each byte crosses USB four
+ * times; on the board's own link port only the byte itself, with port_pace_us standing in for the rest. In idle, sync and menu the clock must reach the cartridge in every frame
  * (16.7 ms): a Gen 1 sync's last loop is ten frames of one 00 each that do not wait for the clock, and the wire counts all ten. So the
  * loop gap is what is left of Local's period after the measured round trip (its running average), never below the floor. */
 #define PICO_LOOP_PERIOD_US 12557
@@ -589,42 +579,41 @@ static void clock_trace(void *context, const char *line)
     logf_host("%s", line);
 }
 
-/* One frame to the Pico: on the UART, or to the host (mGBA standing in for a Pico) inside GB_PICO. */
-static void pico_send_to(bool uart, uint8_t channel, const uint8_t *payload, size_t length)
+/* One frame to the Pico, inside GB_PICO to the host (mGBA standing in for a Pico, or the relay carrying it to a real one). The link
+ * port has no Pico to tell anything. */
+static void pico_send(uint8_t channel, const uint8_t *payload, size_t length)
 {
     uint8_t frame[5 + PICO_MAX_PAYLOAD];
-    if (length > PICO_MAX_PAYLOAD) return;
+    if (s_pico_at != PICO_AT_HOST || length > PICO_MAX_PAYLOAD) return;
     frame[0] = PICO_SYNC0;
     frame[1] = PICO_SYNC1;
     frame[2] = channel;
     frame[3] = (uint8_t)length;
     frame[4] = (uint8_t)(length >> 8);
     if (length) memcpy(frame + 5, payload, length);
-    if (uart) {
-        if (s_uart_ok) uart_write_bytes(PICO_UART, frame, 5 + length);
-    } else {
-        s_send(UDS_EVT_GB_PICO, 0, frame, 5 + length);
-    }
+    s_send(UDS_EVT_GB_PICO, 0, frame, 5 + length);
 }
 
-static void pico_send(uint8_t channel, const uint8_t *payload, size_t length)
-{
-    if (s_pico_at != PICO_AT_PORT) pico_send_to(s_pico_at == PICO_AT_UART, channel, payload, length);
-}
-
-static int32_t start_standalone(enum pico_at at);
-
-/* The board may start on its own: a UART or a link port is set up, no host has claimed the board and the 3DS key is stored. */
+/* The board may start on its own: the link port is set up, no host has claimed the board and the 3DS key is stored. */
 static bool standalone_allowed(void)
 {
-    return (s_uart_ok || linkport_enabled()) && !s_host_claimed && keys_present(UDS_KEY_SLOT_DATA);
+    return linkport_enabled() && !s_host_claimed && keys_present(UDS_KEY_SLOT_DATA);
+}
+
+/* The link port has no round trip of its own: it waits the one the GB-Link gaps were measured with (CONFIG_UDS_LINK_PORT_PACE_US). */
+static int64_t port_pace_us(void)
+{
+#if CONFIG_UDS_LINK_PORT
+    if (s_pico_at == PICO_AT_PORT) return CONFIG_UDS_LINK_PORT_PACE_US;
+#endif
+    return 0;
 }
 
 static int64_t gap_us(enum UDSClockGap gap)
 {
     switch (gap) {
-    case UDS_CLOCK_GAP_ROLE: return PICO_GAP_ROLE_US;
-    case UDS_CLOCK_GAP_BYTE: return PICO_GAP_BYTE_US;
+    case UDS_CLOCK_GAP_ROLE: return PICO_GAP_ROLE_US + port_pace_us();
+    case UDS_CLOCK_GAP_BYTE: return PICO_GAP_BYTE_US + port_pace_us();
     case UDS_CLOCK_GAP_LOOP:
     default: {
         const int64_t gap = PICO_LOOP_PERIOD_US - (int64_t)s_pico.round_trip_avg_us;
@@ -651,13 +640,8 @@ static void pico_exchanged(uint8_t reply)
 
 static void pico_frame(uint8_t channel, const uint8_t *payload, size_t length)
 {
-    if (!s_active) {
-        /* Nothing runs: only a Pico on the UART answering the board's own SetMode starts the wrapper. */
-        const bool mode_active = channel == PICO_CHANNEL_STATUS && length >= 2 &&
-                                 (uint16_t)(payload[0] | (payload[1] << 8)) == PICO_STATUS_GB_MODE_ACTIVE;
-        if (!s_feeding_uart || !mode_active || !s_uart_ok || !standalone_allowed() || start_standalone(PICO_AT_UART) != ESP_OK) return;
-    } else if (s_front != FRONT_PICO || s_pico_at != (s_feeding_uart ? PICO_AT_UART : PICO_AT_HOST)) {
-        return; /* a frame from the other transport than the running wrapper's Pico */
+    if (!s_active || s_front != FRONT_PICO || s_pico_at != PICO_AT_HOST) {
+        return; /* only a wrapper whose Pico is the host's takes its frames */
     }
     if (channel == PICO_CHANNEL_STATUS && length >= 2) {
         const uint16_t status = (uint16_t)(payload[0] | (payload[1] << 8));
@@ -685,7 +669,8 @@ static void pico_frame(uint8_t channel, const uint8_t *payload, size_t length)
     }
 }
 
-/* The Pico's frames, byte by byte as its own serialLayer parses them, so that a stream from a UART can be fed in the same way. */
+/* The Pico's frames, byte by byte as its own serialLayer parses them, so that they may arrive in any pieces (the relay forwards what
+ * the GB-Link's serial port gave it). */
 static void pico_feed(uint8_t b)
 {
     switch (s_pico.rx_state) {
@@ -726,23 +711,11 @@ static void pico_feed(uint8_t b)
     }
 }
 
-/* GB_PICO {Pico frame} from the host, or bytes from the UART. Each transport has its frames checked against the running wrapper's in
- * pico_frame. */
-static void pico_receive(const struct request *request, bool uart)
+/* GB_PICO {Pico frame} from the host. */
+static void pico_receive(const struct request *request)
 {
-    if (!s_active && !uart) return;
-    s_feeding_uart = uart;
+    if (!s_active) return;
     for (uint8_t i = 0; i < request->length; ++i) pico_feed(request->data[i]);
-}
-
-/* With nothing running and the board free to start on its own: ask a Pico on the UART for Game Boy mode now and then. */
-static void probe_pico(void)
-{
-    const int64_t now_us = esp_timer_get_time();
-    if (s_probe_us && now_us - s_probe_us < PICO_PROBE_US) return;
-    s_probe_us = now_us;
-    const uint8_t mode[2] = {PICO_CMD_SET_MODE, PICO_MODE_GB_LINK};
-    pico_send_to(true, PICO_CHANNEL_COMMAND, mode, sizeof(mode));
 }
 
 /* Each pass: until the Pico is in Game Boy mode ask for it; then one byte at a time, each after the gap the last one chose. */
@@ -779,9 +752,10 @@ static void pico_poll(void)
 }
 
 /* The link port on this board's GPIOs (linkport.h) in the Pico's place: the same clock, each byte shifted here and its reply there at
- * once, so a round trip is the byte's own millisecond. Before each byte the clock line is watched for one bit: a cartridge that clocks
- * a byte itself (choosing roles, it may try to be the master) is left to finish. A line low for longer is stuck (nothing on the port,
- * or a console switched off) and is clocked anyway: open drain, nothing fights. With a sense pin the port's VCC is watched too: no
+ * once (a byte takes a few tens of microseconds, linkport.c; port_pace_us stands in for the GB-Link's round trip). Before each byte the
+ * clock line is watched for one bit: a cartridge that clocks a byte itself (choosing roles, it may try to be the master) is left to
+ * finish. A line low for longer is stuck (nothing on the port, or a console switched off) and is clocked anyway: between bytes the
+ * lines are open drain, and they are driven both ways only for the tens of microseconds of a byte. With a sense pin the port's VCC is watched too: no
  * console, or a GBA game (3.3 V), and nothing is clocked; on its own the board stops when the console has been gone a while. */
 #define PORT_BUSY_STUCK_US 20000
 #define PORT_POWER_EVERY_US 250000
@@ -1003,7 +977,7 @@ static void stop_wrapper(void)
 }
 
 /* Starts the wrapper for `game` (kCartridge: the generation is detected). `host`: started by a host's GB_START, which gets the state
- * and stats. `pico`: this board clocks the cartridge, behind a Pico that is `at` the host or the UART, or on its own link port. */
+ * and stats. `pico`: this board clocks the cartridge, behind a Pico at the host or on its own link port (`at`). */
 static int32_t begin_wrapper(const struct gb_game *game, bool host, bool trace, bool pico, enum pico_at at,
                              const uint16_t name[UDS_NAME_WORDS])
 {
@@ -1107,12 +1081,11 @@ static int32_t start_wrapper(const struct request *request)
     return begin_wrapper(game, true, flags & UDS_GB_START_LOG, pico, port ? PICO_AT_PORT : PICO_AT_HOST, name);
 }
 
-/* A Pico on the UART answered the board's SetMode, or a Game Boy is on the link port, with no host: the wrapper runs on its own, for a
- * cartridge whose generation its first sync will tell. Nothing is logged or reported (nobody is listening); the screen shows where it
- * is. */
-static int32_t start_standalone(enum pico_at at)
+/* A Game Boy is on the link port, with no host: the wrapper runs on its own, for a cartridge whose generation its first sync will tell.
+ * Nothing is logged or reported (nobody is listening); the screen shows where it is. */
+static int32_t start_standalone(void)
 {
-    return begin_wrapper(&kCartridge, false, false, true, at, kStandaloneName);
+    return begin_wrapper(&kCartridge, false, false, true, PICO_AT_PORT, kStandaloneName);
 }
 
 /* With nothing running and the board free to start on its own: a link port with a Game Boy on it (or no sense pin to say otherwise)
@@ -1121,7 +1094,7 @@ static void probe_port(void)
 {
     if (!linkport_enabled()) return;
     const enum linkport_power power = linkport_power(NULL);
-    if (power == LINKPORT_POWER_GB || power == LINKPORT_POWER_UNKNOWN) start_standalone(PICO_AT_PORT);
+    if (power == LINKPORT_POWER_GB || power == LINKPORT_POWER_UNKNOWN) start_standalone();
 }
 
 /* On its own, on the link port: a console gone for a while (switched off, unplugged, or a GBA game now) stops the wrapper, and the
@@ -1158,13 +1131,10 @@ static void handle(const struct request *request)
         transfer(request);
         break;
     case UDS_CMD_GB_PICO:
-        pico_receive(request, false);
-        break;
-    case GBWRAP_REQ_UART:
-        pico_receive(request, true);
+        pico_receive(request);
         break;
     case GBWRAP_REQ_HOST:
-        /* A host has the board from now on: a wrapper running on its own stops (its Pico leaves Game Boy mode), and none starts. */
+        /* A host has the board from now on: a wrapper running on its own stops, and none starts until the board restarts. */
         s_host_claimed = true;
         if (s_active && !s_host) stop_wrapper();
         break;
@@ -1186,54 +1156,15 @@ static void gbwrap_task(void *arg)
     bool more = false;
     for (;;) {
         /* With frames still waiting, look for a request and go straight on; otherwise wait a millisecond (or for the next start, and
-         * while the board may start on its own, for the next look for a Pico on the UART). */
+         * while the board may start on its own, for the next look at the link port). */
         const bool may_start = !s_active && standalone_allowed();
         const TickType_t wait = s_active ? (more ? 0 : 1) : may_start ? pdMS_TO_TICKS(100) : portMAX_DELAY;
         bool got = xQueueReceive(s_queue, &request, wait) == pdTRUE;
         more = s_active && service();
         if (got) handle(&request);
         watch_standalone_port();
-        if (may_start && !s_active) {
-            if (s_uart_ok) probe_pico();
-            probe_port();
-        }
+        if (may_start && !s_active) probe_port();
     }
-}
-
-#if CONFIG_UDS_PICO_LINK
-/* The Pico's bytes, as they come, to the wrapper task. */
-static void uart_task(void *arg)
-{
-    (void)arg;
-    uint8_t buffer[64];
-    for (;;) {
-        const int count = uart_read_bytes(PICO_UART, buffer, sizeof(buffer), pdMS_TO_TICKS(20));
-        if (count > 0) gbwrap_request(GBWRAP_REQ_UART, 0, buffer, (size_t)count);
-    }
-}
-
-#endif
-
-static void uart_init(void)
-{
-#if CONFIG_UDS_PICO_LINK
-    const uart_config_t config = {
-        .baud_rate = PICO_UART_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    if (uart_driver_install(PICO_UART, 1024, 1024, 0, NULL, 0) != ESP_OK) return;
-    if (uart_param_config(PICO_UART, &config) != ESP_OK ||
-        uart_set_pin(PICO_UART, CONFIG_UDS_PICO_LINK_TX_GPIO, CONFIG_UDS_PICO_LINK_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
-        uart_driver_delete(PICO_UART);
-        return;
-    }
-    s_uart_ok = true;
-    xTaskCreate(uart_task, "pico_uart", 3072, NULL, TASK_PRIORITY, NULL);
-#endif
 }
 
 void gbwrap_init(gbwrap_send_t send)
@@ -1241,7 +1172,6 @@ void gbwrap_init(gbwrap_send_t send)
     s_send = send;
     s_queue = xQueueCreate(QUEUE_LENGTH, sizeof(struct request));
     s_rx_ring = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-    uart_init();
     linkport_init(); /* does nothing without CONFIG_UDS_LINK_PORT */
     xTaskCreate(gbwrap_task, "gbwrap", TASK_STACK, NULL, TASK_PRIORITY, NULL);
 }

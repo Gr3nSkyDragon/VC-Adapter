@@ -2,12 +2,14 @@
  *
  * A Game Boy link port wired straight to this board's GPIOs, with no GB-Link (Pico) between: firmware 1.8 on, CONFIG_UDS_LINK_PORT.
  * The board does here what the Pico's SPI did in Game Boy mode: it is the clock master and shifts one byte at a time, MSB first, the
- * clock idle high, each bit put out on the falling edge and read before the rising one (a Game Boy's internal clock, 8192 Hz unless
- * menuconfig says otherwise). The cartridge, in a GBA (in its GB/GBC mode), a GBC or a Game Boy, is the slave.
+ * clock idle high, each bit put out on the falling edge and read before the rising one, fast as the Pico does (262144 Hz unless
+ * menuconfig says otherwise; linkport.c says why not a Game Boy's own 8192 Hz). The cartridge, in a GBA (in its GB/GBC mode), a GBC or
+ * a Game Boy, is the slave.
  *
  * The port's signals are 5 V in GB/GBC mode (3.3 V for a GBA game); this chip's pins are 3.3 V only. A level shifter goes between, its
- * high side powered from the port's own VCC (pin 1) so that it follows the console. The pins here are open drain: the shifter's
- * pull-ups (or the chip's own) make the high level, so a cartridge that drives the clock itself never fights a driven high. SI and SO
+ * high side powered from the port's own VCC (pin 1) so that it follows the console. Between bytes the pins are open drain (the
+ * shifter's pull-ups make the high level), so a cartridge that drives the clock itself never fights a driven high; during a byte they
+ * are driven both ways, as the Pico drives them, for crisp edges through the shifter. SI and SO
  * are this board's, as in the GB-Link's notation (its SI takes the console's SO). SD is wired for the shared pinout but unused. See
  * the README's "GBA link port" for the wiring.
  *
@@ -43,7 +45,7 @@ enum linkport_power linkport_power(uint32_t *millivolts);
 bool linkport_clock_busy(void);
 
 /* One transfer with this board as the master: `out` is shifted out while the byte the other side shifts back comes in. Takes 16 half
- * periods (about 1 ms at 8192 Hz); blocks the caller meanwhile. Nobody on the other end reads as FF (the lines idle high). */
+ * periods (about 31 us at 262144 Hz) with interrupts held off on this core. Nobody on the other end reads as FF (the lines idle high). */
 uint8_t linkport_exchange(uint8_t out);
 
 /* Lets go of the clock and the data line (both idle high). */

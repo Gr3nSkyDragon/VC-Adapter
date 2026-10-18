@@ -1,23 +1,5 @@
 menu "UDS bridge"
 
-config UDS_PICO_LINK
-    bool "GB-Link (Pico) wired to a UART"
-    default n
-    help
-        A GB-Link wired to this board with three wires, as GB-Link's own ESP32 firmware allows (UART 1 at 921600; the Pico's bridge
-        UART is its uart1, GP8 TX and GP9 RX). With no host on USB the board asks it for Game Boy mode and runs the Game Boy wrapper
-        on its own. Off by default: the supported way is both boards on a PC's USB with uds-gblink-relay (mGBA's tools) in between.
-
-config UDS_PICO_LINK_TX_GPIO
-    int "GPIO wired to the GB-Link's GP9 (its UART RX)"
-    depends on UDS_PICO_LINK
-    default 2
-
-config UDS_PICO_LINK_RX_GPIO
-    int "GPIO wired to the GB-Link's GP8 (its UART TX)"
-    depends on UDS_PICO_LINK
-    default 1
-
 config UDS_LINK_PORT
     bool "Game Boy link port wired to GPIOs (no GB-Link)"
     default n
@@ -27,7 +9,7 @@ config UDS_LINK_PORT
         own; a host's HELLO takes the board back, and mGBA's uds-gblink-relay --port starts it with the log on the PC. The defaults
         are the shared VC-Adapter / GB-Link pinout on a Seeed XIAO ESP32-S3: SC on D0, SI on D1, SO on D2, SD on D3. SI and SO are
         named from this board's side, as on the GB-Link: this board's SI takes the console's SO, its SO feeds the console's SI. See
-        the README's "GBA link port". The defaults share GPIO1 and GPIO2 with UDS_PICO_LINK's: to build both in, move one of them.
+        the README's "GBA link port".
 
 config UDS_LINK_PORT_SC_GPIO
     int "GPIO for SC, the clock (port pin 5)"
@@ -64,12 +46,25 @@ config UDS_LINK_PORT_SENSE_GPIO
         running a GBA game (3.3 V): it starts on its own only for a Game Boy, and stops when the console goes off. Without it the
         board assumes a Game Boy is there.
 
-config UDS_LINK_PORT_HALF_PERIOD_US
-    int "Half a clock period, in microseconds"
+config UDS_LINK_PORT_CLOCK_HZ
+    int "Link clock while a byte goes out, in Hz"
     depends on UDS_LINK_PORT
-    range 2 1000
-    default 61
+    range 8192 1000000
+    default 262144
     help
-        61 is a Game Boy's own internal clock (8192 Hz), the speed the games are written for.
+        How fast the 8 bits of each byte are clocked (how often bytes go is the pacing below). 262144 is a Game Boy Color's fast serial
+        clock, well inside what a Game Boy takes as a slave, and makes a byte about 31 us. The GB-Link's Pico clocks at about 1 MHz.
+        8192, a Game Boy's own clock, makes a byte a millisecond: long enough that a cartridge re-arming its serial port in the
+        middle of one loses its place (the first hardware run, firmware 1.8 before this setting).
+
+config UDS_LINK_PORT_PACE_US
+    int "Extra wait after each byte while roles are chosen and data is exchanged, in microseconds"
+    depends on UDS_LINK_PORT
+    range 0 20000
+    default 2500
+    help
+        The gaps between bytes were measured with a GB-Link, where each byte also made a round trip through a PC (about 2.5 ms): the
+        cartridge got about 3 ms between bytes, and trades worked. The link port has no round trip, so this stands in for it, keeping
+        the gaps a cartridge has been seen to keep up with. The idle, sync and menu loops keep their 12.6 ms period either way.
 
 endmenu
