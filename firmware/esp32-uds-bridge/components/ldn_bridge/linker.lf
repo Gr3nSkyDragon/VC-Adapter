@@ -6,3 +6,11 @@ archive: libldn_bridge.a
 entries:
     * (default);
         bss->dram0_bss SURROUND(ldn_bridge_bss)
+    # The emulated wireless adapter's per-word path (../../rfu, CONFIG_UDS_RFU_ADAPTER): the vendored core's command, frame and
+    # timer code, which the GBA waits on in its serial interrupt. rfu_adapter.cpp marks its own functions IRAM_ATTR.
+    if UDS_RFU_CORE_IRAM = y:
+        rfu_adapter:_ZN8rfuproto7RfuCore14processCommandEv (noflash)
+        rfu_adapter:_ZN8rfuproto7RfuCore14applyNetPacketEmmPKhtm (noflash)
+        rfu_adapter:_ZN8rfuproto7RfuCore4tickEm (noflash)
+        rfu_adapter:_ZN8rfuproto7RfuCore14resetLinkStateEv (noflash)
+        rfu_adapter:_ZN8rfuproto16Rfu1StreamParser4pushEPKhj (noflash)

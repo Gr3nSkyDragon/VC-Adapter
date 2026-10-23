@@ -25,6 +25,12 @@ if(WIN32)
 		src/uds-keyfile.c
 		src/esp32-serial.c)
 	target_link_libraries(uds-gblink-relay setupapi winmm)
+
+	# GB-Link Switch LDN console commands to a board in its Switch mode, opened without resetting it.
+	add_executable(ldn-console
+		src/ldn-console.c
+		src/esp32-serial.c)
+	target_link_libraries(ldn-console setupapi)
 endif()
 
 # The flasher's ROM loader client against a simulated ESP32-S3.

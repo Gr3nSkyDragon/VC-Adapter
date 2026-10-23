@@ -20,6 +20,12 @@ Kept as close to upstream as possible, so that a newer upstream can be copied ov
   No frame of this firmware's own can be mistaken for one. (It used to stop at binary mode, so a board whose Switch host had
   set the wire up and then closed the port stayed in Switch LDN mode until it was power cycled.)
 
+- `pico_link.c`: with `CONFIG_UDS_RFU_ADAPTER` (the VC-Adapter board), the adapter is not a GB-Link Pico on the UART but
+  the Wireless Adapter emulated on the board's own link port pins (`../rfu`): the 'GB' frames go to `rfu_adapter_write`
+  and come from `rfu_adapter_read`, the link task runs on the first core (the second belongs to the adapter's link), and
+  `pico_link_probe` / `pico_link_swap` leave the pins alone, and the inbound frame queue is 24 frames instead of 48 (the
+  adapter's link code needs the internal RAM). Without the option the file builds as upstream's.
+
 Everything else, `components/zstd` included, is unchanged. The files are built as their own component,
 `../components/ldn_bridge`, whose linker fragment puts all their static data in one block; when the board boots in 3DS mode
 that block is handed to the heap (`main/bridge_mode.c`), since this code does not run then. Like upstream, it needs ESP-IDF

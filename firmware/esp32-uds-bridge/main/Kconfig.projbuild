@@ -5,9 +5,8 @@ config UDS_SWITCH_LDN
     default y
     help
         GB-Link Switch LDN's bridge (ldn/), with the board switching between it and the 3DS side by what the host speaks. Its GBA
-        side drives a GB-Link Pico (on the UART, or through a host), so the GB-Link profile has it. The VC-Adapter board profile
-        turns it off until that board has a GBA side of its own (its link port pins are the Pico UART's defaults). Ignored with
-        ESP-IDF 5.x, which cannot build it.
+        side drives a GB-Link Pico (on the UART, or through a host) in the GB-Link profile; on the VC-Adapter board the wireless
+        adapter is emulated on the link port pins instead (UDS_RFU_ADAPTER). Ignored with ESP-IDF 5.x, which cannot build it.
 
 config UDS_FIRMWARE_MINOR
     int
@@ -27,6 +26,41 @@ config UDS_LINK_PORT
         are the shared VC-Adapter / GB-Link pinout on a Seeed XIAO ESP32-S3: SC on D0, SI on D1, SO on D2, SD on D3. SI and SO are
         named from this board's side, as on the GB-Link: this board's SI takes the console's SO, its SO feeds the console's SI. See
         the README's "GBA link port".
+
+config UDS_RFU_ADAPTER
+    bool "Switch side: the GBA Wireless Adapter emulated on the link port (no GB-Link)"
+    depends on UDS_LINK_PORT && UDS_SWITCH_LDN
+    default y
+    help
+        The Switch side's GBA end on this board's own link port pins, with no GB-Link: the wireless adapter a GBA game sees is
+        GBLink-Firmware's emulation (rfu/), run here instead of on the Pico, and pico_link hands the bridge's frames to it in
+        place of its UART. The GBA's 2 MHz serial clock is followed in software, so while the adapter is on the second core does
+        nothing else, with interrupts masked (no interrupt watchdog check on that core). The console's link port must be in GBA
+        mode (3.3 V).
+
+config UDS_RFU_STATUS_LED_GPIO
+    int "Status LED for the emulated adapter, active low (-1 for none)"
+    depends on UDS_RFU_ADAPTER
+    default 21
+    help
+        The Seeed XIAO ESP32-S3's user LED (GPIO21) by default. Off: the adapter is off. A blip every two seconds: waiting for the
+        GBA. Slow blink: the GBA clocks it, but no ID word gets through. Fast blink: the ID exchange is under way. On: the GBA found
+        the adapter; it goes off for a moment every second while the Switch side is sending.
+
+config UDS_RFU_GLUE_IRAM
+    bool "Adapter: the link loop and its helpers in IRAM"
+    depends on UDS_RFU_ADAPTER
+    default y
+
+config UDS_RFU_CORE_IRAM
+    bool "Adapter: the protocol core's command, frame and timer code in IRAM"
+    depends on UDS_RFU_ADAPTER
+    default y
+
+config UDS_RFU_MIN_HOLD_US
+    int "Adapter: least time the GBA is held after a command word, in microseconds (0: none)"
+    depends on UDS_RFU_ADAPTER
+    default 0
 
 config UDS_LINK_PORT_SC_GPIO
     int "GPIO for SC, the clock (port pin 5)"

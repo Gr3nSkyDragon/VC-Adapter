@@ -10,6 +10,10 @@
  * Each step can be done on its own. Flashing writes the whole image, which erases the key store, so the keys are stored after the
  * flash; a board is never assumed to have them already.
  *
+ * Firmware with a Switch side starts in whichever mode it last ran, and talking to it here leaves it in 3DS mode. "Default mode"
+ * picks the one it is left in: for the Switch side, the tool ends by sending what GB-Link Switch LDN's own hosts send ("LDN_"), which
+ * moves the board over, and checks that its Switch side answers. Hosts move it back and forth later as before.
+ *
  * The firmware comes in two builds (package-release-bin.ps1): firmware 1.8, the GB-Link build (3DS and Switch sides), for a board
  * on the PC's USB with a GB-Link, and firmware 1.9, the VC-Adapter board build (beta, Game Boy side only), for a board wired to the
  * console's link port. The "Build for" choice picks the newest image of that build next to this program; an image's build is read
@@ -55,6 +59,9 @@ enum {
 	ID_SWITCH_CHECK,
 	ID_SWITCH_EDIT,
 	ID_SWITCH_BROWSE,
+	ID_MODE_LABEL,
+	ID_MODE_SWITCH,
+	ID_MODE_3DS,
 	ID_PORT_LABEL,
 	ID_PORT_COMBO,
 	ID_PORT_REFRESH,
@@ -85,6 +92,7 @@ struct Job {
 	char prodKeys[MAX_PATH];
 	char port[32];
 	bool usbJtag;
+	bool startSwitch; // leave the board in its Switch side ("Default mode")
 };
 
 static int _px(int value) {
@@ -185,6 +193,60 @@ static bool _openBoard(struct UDSEsp32* esp, const char* port, unsigned timeoutM
 		}
 		Sleep(500);
 	} while (GetTickCount64() - start < timeoutMs);
+	return false;
+}
+
+// Whether the board's Switch side answers on `port`: GB-Link Switch LDN's text console replies to LDN_INFO with a line of its own.
+static bool _switchSideAnswers(const char* portName, unsigned timeoutMs) {
+	struct Esp32Serial* port = Esp32SerialOpen(portName, 115200);
+	if (!port) {
+		return false;
+	}
+	static const char kInfo[] = "\nLDN_INFO\n";
+	char seen[512];
+	size_t used = 0;
+	bool answered = false;
+	if (Esp32SerialWrite(port, kInfo, sizeof(kInfo) - 1)) {
+		ULONGLONG start = GetTickCount64();
+		while (!answered && GetTickCount64() - start < timeoutMs) {
+			uint8_t buffer[128];
+			int n = Esp32SerialRead(port, buffer, sizeof(buffer));
+			if (n < 0) {
+				break;
+			}
+			if (n == 0) {
+				Sleep(20);
+				continue;
+			}
+			// Kept as a sliding window of the text, enough to hold the answer line.
+			if (used + (size_t) n >= sizeof(seen)) {
+				size_t keep = sizeof(seen) / 2;
+				memmove(seen, seen + used - keep, keep);
+				used = keep;
+			}
+			memcpy(seen + used, buffer, (size_t) n);
+			used += (size_t) n;
+			seen[used] = 0;
+			answered = strstr(seen, "LDN_INFO ") != NULL;
+		}
+	}
+	Esp32SerialClose(port);
+	return answered;
+}
+
+// Leaves the board in its Switch side. It is in 3DS mode now (this tool's Hello put it there). Its 3DS side goes over to the Switch
+// side, and keeps that as the mode it starts in, when "LDN_" arrives after two seconds with no 3DS frame (main.c,
+// MODE_WATCH_QUIET_US): what GB-Link Switch LDN's hosts open with. The board restarts, and its port comes back a moment later.
+static bool _startInSwitchMode(const char* portName) {
+	Sleep(2500);
+	ULONGLONG start = GetTickCount64();
+	do {
+		// The first LDN_INFO moves the board; once it has restarted, one gets the Switch side's answer.
+		if (_switchSideAnswers(portName, 2000)) {
+			return true;
+		}
+		Sleep(500);
+	} while (GetTickCount64() - start < 20000);
 	return false;
 }
 
@@ -327,6 +389,17 @@ static DWORD WINAPI _work(LPVOID param) {
 		}
 		udsEsp32Close(&esp);
 	}
+	if (job->startSwitch) {
+		_log("Setting the default mode: Switch (GBA trades)");
+		if (!_startInSwitchMode(job->port)) {
+			_log("The board's Switch side did not answer. Firmware with no Switch side (built with ESP-IDF 5.x) stays in 3DS mode.");
+			summary = "The board was set up, but it did not go over to its Switch side (see the log). It starts in 3DS mode.";
+			goto done;
+		}
+		_log("The board starts in Switch mode (GBA trades)");
+	} else {
+		_log("The board starts in 3DS mode (Game Boy trades)");
+	}
 	ok = true;
 	if (job->flash && (!job->key || !job->switchKeys)) {
 		summary = job->key ? "Done: the firmware is flashed and the 3DS key stored. Store the Switch keys too: flashing erased them."
@@ -418,6 +491,8 @@ static void _updateEnabled(void) {
 	EnableWindow(_item(ID_KEY_BROWSE), !sBusy && key);
 	EnableWindow(_item(ID_SWITCH_EDIT), !sBusy && switchKeys);
 	EnableWindow(_item(ID_SWITCH_BROWSE), !sBusy && switchKeys);
+	EnableWindow(_item(ID_MODE_SWITCH), !sBusy);
+	EnableWindow(_item(ID_MODE_3DS), !sBusy);
 	EnableWindow(_item(ID_PORT_COMBO), !sBusy);
 	EnableWindow(_item(ID_PORT_REFRESH), !sBusy);
 	EnableWindow(_item(ID_START), !sBusy && (flash || key || switchKeys));
@@ -473,6 +548,7 @@ static void _start(void) {
 	job->flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
 	job->key = IsDlgButtonChecked(sWindow, ID_KEY_CHECK) == BST_CHECKED;
 	job->switchKeys = IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
+	job->startSwitch = IsDlgButtonChecked(sWindow, ID_MODE_SWITCH) == BST_CHECKED;
 	GetWindowTextA(_item(ID_FW_EDIT), job->firmware, sizeof(job->firmware));
 	GetWindowTextA(_item(ID_KEY_EDIT), job->keys, sizeof(job->keys));
 	GetWindowTextA(_item(ID_SWITCH_EDIT), job->prodKeys, sizeof(job->prodKeys));
@@ -633,13 +709,16 @@ static void _create(void) {
 	_control("BUTTON", "Store the Switch keys from (prod.keys):", BS_AUTOCHECKBOX | WS_TABSTOP, ID_SWITCH_CHECK, 12, 172, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_SWITCH_EDIT, 30, 194, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_SWITCH_BROWSE, 488, 193, 100, 26);
-	_control("STATIC", "Board:", SS_LEFT, ID_PORT_LABEL, 12, 234, 60, 20);
-	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 230, 408, 200);
-	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 229, 100, 26);
-	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 270, 140, 30);
-	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 276, 424, 18);
+	_control("STATIC", "Default mode:", SS_LEFT, ID_MODE_LABEL, 12, 230, 90, 20);
+	_control("BUTTON", "Switch (GBA trades)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_MODE_SWITCH, 104, 228, 200, 22);
+	_control("BUTTON", "3DS (Game Boy trades)", BS_AUTORADIOBUTTON, ID_MODE_3DS, 310, 228, 220, 22);
+	_control("STATIC", "Board:", SS_LEFT | WS_GROUP, ID_PORT_LABEL, 12, 266, 60, 20);
+	_control("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_PORT_COMBO, 72, 262, 408, 200);
+	_control("BUTTON", "Refresh", BS_PUSHBUTTON | WS_TABSTOP, ID_PORT_REFRESH, 488, 261, 100, 26);
+	_control("BUTTON", "Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_START, 12, 302, 140, 30);
+	_control(PROGRESS_CLASSA, "", 0, ID_PROGRESS, 164, 308, 424, 18);
 	SendMessageA(_item(ID_PROGRESS), PBM_SETRANGE32, 0, 1000);
-	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 310, 576, 190);
+	_control("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_LOG, 12, 342, 576, 190);
 
 	char path[MAX_PATH];
 	_loadSetting("build", path, sizeof(path));
@@ -659,6 +738,8 @@ static void _create(void) {
 		_defaultProdKeys(path, sizeof(path));
 	}
 	SetWindowTextA(_item(ID_SWITCH_EDIT), path);
+	_loadSetting("mode", path, sizeof(path));
+	CheckRadioButton(sWindow, ID_MODE_SWITCH, ID_MODE_3DS, !strcmp(path, "3ds") ? ID_MODE_3DS : ID_MODE_SWITCH);
 	CheckDlgButton(sWindow, ID_FW_CHECK, BST_CHECKED);
 	CheckDlgButton(sWindow, ID_KEY_CHECK, BST_CHECKED);
 	CheckDlgButton(sWindow, ID_SWITCH_CHECK, BST_CHECKED);
@@ -685,6 +766,12 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 			if (HIWORD(wParam) == BN_CLICKED) {
 				_saveSetting("build", _selectedBuild() == BUILD_VCADAPTER ? "vcadapter" : "gblink");
 				_pickFirmware();
+			}
+			break;
+		case ID_MODE_SWITCH:
+		case ID_MODE_3DS:
+			if (HIWORD(wParam) == BN_CLICKED) {
+				_saveSetting("mode", IsDlgButtonChecked(sWindow, ID_MODE_3DS) == BST_CHECKED ? "3ds" : "switch");
 			}
 			break;
 		case ID_FW_BROWSE:
@@ -769,7 +856,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 	RegisterClassA(&wc);
 
 	DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-	RECT rect = {0, 0, _px(600), _px(512)};
+	RECT rect = {0, 0, _px(600), _px(544)};
 	AdjustWindowRect(&rect, style, FALSE);
 	HWND hwnd = CreateWindowExA(0, wc.lpszClassName, TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
 	                            NULL, NULL, instance, NULL);

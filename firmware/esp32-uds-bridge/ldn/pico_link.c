@@ -9,6 +9,11 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#if CONFIG_UDS_RFU_ADAPTER
+/* VC-Adapter merge: no Pico on this board. The wireless adapter is emulated on its own link port pins (../rfu), and its 'GB'
+   frames go to and from it here in place of the UART. */
+#include "rfu_adapter.h"
+#endif
 
 #define PICO_LINK_UART UART_NUM_1
 #define SYNC0 0x47 /* 'G' */
@@ -144,7 +149,11 @@ static void send_set_mode(void)
 /* Frames queued each way. The original ESP32 hosts a room with little heap to spare, and
    a Wi-Fi driver short of heap loses frames to the Switch; a few frames is all a queue
    holds in practice. */
-#if CONFIG_IDF_TARGET_ESP32
+#if CONFIG_UDS_RFU_ADAPTER
+/* VC-Adapter merge: the on-board adapter hands frames over every millisecond, with no UART burst to absorb, and its link code
+   takes internal RAM of its own. */
+#define FRAME_QUEUE 24
+#elif CONFIG_IDF_TARGET_ESP32
 #define FRAME_QUEUE 32
 #else
 #define FRAME_QUEUE 48
@@ -152,6 +161,23 @@ static void send_set_mode(void)
 
 static bool s_uart_installed;
 
+#if CONFIG_UDS_RFU_ADAPTER
+/* VC-Adapter merge: the on-board adapter stands in for the UART driver. */
+static bool install_driver(void)
+{
+    if (s_uart_installed) return true;
+    rfu_adapter_start();
+    s_uart_installed = true;
+    return true;
+}
+
+static void remove_driver(void)
+{
+    if (!s_uart_installed) return;
+    rfu_adapter_stop();
+    s_uart_installed = false;
+}
+#else
 /* Installed from the link task so the ISR runs on that core, away from Wi-Fi.
    RX threshold 32 of the 128-byte FIFO: at 921600 baud a near-full threshold leaves
    <0.1 ms, which a busy Wi-Fi core overruns. While the page carries the adapter's frames
@@ -189,6 +215,7 @@ static void remove_driver(void)
     uart_driver_delete(PICO_LINK_UART);
     s_uart_installed = false;
 }
+#endif
 
 static void link_task(void *arg)
 {
@@ -211,7 +238,13 @@ static void link_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));   /* retried until the heap has room */
         else
         {
+#if CONFIG_UDS_RFU_ADAPTER
+            /* VC-Adapter merge: the on-board adapter. */
+            const int read = (int)rfu_adapter_read(buffer, sizeof(buffer));
+            if (read == 0) vTaskDelay(1);
+#else
             const int read = uart_read_bytes(PICO_LINK_UART, buffer, sizeof(buffer), pdMS_TO_TICKS(2));
+#endif
             for (int i = 0; i < read; ++i) feed(buffer[i]);
 
             /* Silent adapter has left the mode: clear state and resume SetMode, so
@@ -254,7 +287,10 @@ void pico_link_start(void)
     s_running = true;
     static StaticSemaphore_t ready_space;
     SemaphoreHandle_t ready = xSemaphoreCreateBinaryStatic(&ready_space);
-#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+#if CONFIG_UDS_RFU_ADAPTER
+    /* VC-Adapter merge: the second core belongs to the on-board adapter's link. */
+    xTaskCreatePinnedToCore(link_task, "pico_link", 4096, ready, 10, &s_task, 0);
+#elif CONFIG_FREERTOS_NUMBER_OF_CORES > 1
     /* Off the core running Wi-Fi and the Pia tick. */
     xTaskCreatePinnedToCore(link_task, "pico_link", 4096, ready, 10, &s_task, 1);
 #else
@@ -286,7 +322,12 @@ bool pico_link_write(const uint8_t *bytes, size_t length)
         return xQueueSend(s_host_out, &frame, 0) == pdTRUE;
     }
     if (!s_uart_installed) return false;
+#if CONFIG_UDS_RFU_ADAPTER
+    rfu_adapter_write(bytes, length);   /* VC-Adapter merge: the on-board adapter */
+    return true;
+#else
     return uart_write_bytes(PICO_LINK_UART, bytes, length) == (int)length;
+#endif
 }
 
 bool pico_link_set_port(pico_port_t port)
@@ -357,7 +398,12 @@ bool pico_link_poll_inbound(uint8_t *frame, size_t capacity, size_t *length)
 
 void pico_link_set_mode(void) { send_set_mode(); }
 
+#if CONFIG_UDS_RFU_ADAPTER
+/* VC-Adapter merge: the on-board adapter takes frames as they are written. */
+void pico_link_flush(void) { }
+#else
 void pico_link_flush(void) { uart_wait_tx_done(PICO_LINK_UART, pdMS_TO_TICKS(200)); }
+#endif
 
 void pico_link_stats(uint32_t *rx_frames, uint32_t *tx_frames, uint32_t *rx_bytes,
                      uint32_t *resync, uint32_t *dropped)
@@ -396,6 +442,9 @@ void pico_link_bootsel(void)
 /* Fixes a reversed TX/RX pair at runtime via the GPIO matrix. */
 void pico_link_swap(void)
 {
+#if CONFIG_UDS_RFU_ADAPTER
+    return;   /* VC-Adapter merge: no UART; PICO_LINK_PIN_TX/RX are link port pins on this board */
+#endif
     const bool wasRunning = s_running;
     if (wasRunning) pico_link_stop();
     s_swapped = !s_swapped;
@@ -408,6 +457,12 @@ void pico_link_swap(void)
    a pull-up) is driven; one that follows both pulls is unwired. */
 void pico_link_probe(bool *tx_driven, bool *rx_driven)
 {
+#if CONFIG_UDS_RFU_ADAPTER
+    /* VC-Adapter merge: no UART; PICO_LINK_PIN_TX/RX are link port pins on this board, not to be reconfigured. */
+    if (tx_driven) *tx_driven = false;
+    if (rx_driven) *rx_driven = false;
+    return;
+#endif
     const bool wasRunning = s_running;
     if (wasRunning) pico_link_stop();
 

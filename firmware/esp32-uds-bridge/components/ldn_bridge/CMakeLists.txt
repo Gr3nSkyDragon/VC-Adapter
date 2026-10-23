@@ -3,9 +3,16 @@
 # It needs ESP-IDF 6.1; with 5.x the component is empty and the firmware has the 3DS side only.
 if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
     include("${CMAKE_CURRENT_LIST_DIR}/../../ldn/SOURCES.cmake")
+    # The VC-Adapter board has no GB-Link: its GBA end is the wireless adapter emulated on its own link port pins (../../rfu,
+    # CONFIG_UDS_RFU_ADAPTER), which pico_link uses in place of its UART. In this component too, so that its static data is
+    # handed to the heap in 3DS mode with the rest.
+    set(rfu_sources)
+    if(CONFIG_UDS_RFU_ADAPTER)
+        set(rfu_sources "${CMAKE_CURRENT_LIST_DIR}/../../rfu/rfu_adapter.cpp")
+    endif()
     idf_component_register(
-        SRCS ${BRIDGE_SOURCES} ${BRIDGE_TRANSPORT_USB}
-        INCLUDE_DIRS "${BRIDGE_COMMON}"
+        SRCS ${BRIDGE_SOURCES} ${BRIDGE_TRANSPORT_USB} ${rfu_sources}
+        INCLUDE_DIRS "${BRIDGE_COMMON}" "${CMAKE_CURRENT_LIST_DIR}/../../rfu"
         REQUIRES ${BRIDGE_REQUIRES} esp_driver_usb_serial_jtag
         LDFRAGMENTS "linker.lf"
     )
