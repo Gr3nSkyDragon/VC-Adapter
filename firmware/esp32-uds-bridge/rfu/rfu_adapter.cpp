@@ -84,10 +84,12 @@ static constexpr uint32_t kSdPulseMin = us(400);
 static constexpr uint32_t kSdPulseMax = us(3000);
 static constexpr uint32_t kSdSettle = us(60);
 
-// How long one wait for SC lasts before the loop looks at anything else, while the GBA is master and while it waits for an
-// event.
-static constexpr uint32_t kListenBudget = us(100);
+// How long one wait for SC lasts before the loop looks at anything else: while the GBA waits for an event, and once the GBA
+// has gone quiet (a wait per breath; until then a wait runs to the quiet spell, see session). Each return to the loop (the
+// timer read, the network frames, the breath) is a moment a command's first word can start in unseen: with 100 us waits the
+// one lost word in a whole trading session was a search command after a quiet spell.
 static constexpr uint32_t kWaitListenBudget = us(20);
+static constexpr uint32_t kQuietListenBudget = us(1000);
 
 // rfuProtocolSection.cpp's: a GBA writing its save holds its serial interrupt off for a whole sector erase.
 static constexpr uint32_t kGbaHandshakeUs = 60000;
@@ -719,7 +721,7 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
         // Until the GBA goes quiet the wait runs to the quiet spell in one go: there is nothing to do between commands, and
         // every return to the loop is a moment a command's unannounced first word can start in. Hardware tests lost the first
         // bit of command headers (31 of 32 bits arrived), and with each a 130 ms librfu retry.
-        uint32_t budget = kListenBudget;
+        uint32_t budget = kQuietListenBudget;
         if (!s_quiet)
         {
             const uint32_t since = ccount() - s_wordEndCc;

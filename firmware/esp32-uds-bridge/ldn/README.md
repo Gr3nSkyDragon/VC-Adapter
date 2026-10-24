@@ -25,6 +25,13 @@ Kept as close to upstream as possible, so that a newer upstream can be copied ov
   and come from `rfu_adapter_read`, the link task runs on the first core (the second belongs to the adapter's link), and
   `pico_link_probe` / `pico_link_swap` leave the pins alone, and the inbound frame queue is 24 frames instead of 48 (the
   adapter's link code needs the internal RAM). Without the option the file builds as upstream's.
+- `pia_bridge.c`: with `CONFIG_UDS_RFU_KEEP_ADAPTER` (on by default with the emulated adapter), a finished session or failed
+  join no longer restarts the board, and a finished session no longer resets the adapter (mode re-entry): either would take
+  the adapter on this chip away from a GBA that may be waiting on it, as one leaving the trade room is (a hardware test
+  ended on a black screen that way). The bridge stops, tells the adapter its partner has left (`RFU1_DISCONNECT`, which
+  the GBA's link manager sees as a lost partner), and starts its room search again a second later. Hosting's radio is
+  stopped before the session's, so the room search gets its station back. Without the option it restarts the board as
+  upstream does.
 
 Everything else, `components/zstd` included, is unchanged. The files are built as their own component,
 `../components/ldn_bridge`, whose linker fragment puts all their static data in one block; when the board boots in 3DS mode

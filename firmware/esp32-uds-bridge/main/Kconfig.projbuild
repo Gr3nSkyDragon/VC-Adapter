@@ -38,6 +38,17 @@ config UDS_RFU_ADAPTER
         nothing else, with interrupts masked (no interrupt watchdog check on that core). The console's link port must be in GBA
         mode (3.3 V).
 
+config UDS_RFU_KEEP_ADAPTER
+    bool "Adapter: keep it up when the Switch side's session ends (restart the bridge in place)"
+    depends on UDS_RFU_ADAPTER
+    default y
+    help
+        GB-Link Switch LDN restarts the board after every session and failed join, and resets the adapter when a session ends;
+        with a GB-Link the Pico keeps answering the GBA meanwhile. Here the adapter is on this chip, so that would take it off the
+        GBA's link, and a GBA waiting on it for an event (as while it leaves the trade room) would wait for good. With this on,
+        the bridge stops and starts its room search again in place instead, the adapter keeps running, and a session's end
+        reaches the GBA as its partner disconnecting. Off: the board restarts as GB-Link Switch LDN does.
+
 config UDS_RFU_STATUS_LED_GPIO
     int "Status LED for the emulated adapter, active low (-1 for none)"
     depends on UDS_RFU_ADAPTER

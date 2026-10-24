@@ -11,6 +11,7 @@
 #include "transport.h"
 
 #include <stdio.h>
+#include "sdkconfig.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -106,6 +107,17 @@ static struct
     uint8_t host_channel;
     int64_t closing_ms;                 /* when the GBA closed the link, 0 while it is open */
 } g;
+
+/* VC-Adapter merge: with the adapter on this chip (../rfu), a restart of the board takes the
+   adapter off the GBA's link too, and a mode re-entry resets it. A GBA waiting on the adapter
+   for an event (as it does while it leaves the trade room) then waits for good: a hardware
+   test ended on a black screen that way. So the bridge restarts in place instead, a moment
+   later (bridge_restart, pia_bridge_poll), and the adapter is told the link is gone the way a
+   real radio would, which the GBA's link manager answers as a lost partner. */
+#if CONFIG_UDS_RFU_KEEP_ADAPTER
+#define RESTART_PAUSE_MS 1000
+static int64_t s_restart_at;
+#endif
 
 /* Back-off for a room whose handshake failed, doubling per failure. Each attempt joins as
    a new station, so retrying a silent Switch only piles up dead stations. Keyed by SSID,
@@ -732,6 +744,9 @@ void pia_bridge_start(void)
 
 void pia_bridge_stop(void)
 {
+#if CONFIG_UDS_RFU_KEEP_ADAPTER
+    s_restart_at = 0;   /* VC-Adapter merge: LDN_BRIDGE_STOP also cancels a pending restart */
+#endif
     if (!g.started) return;
     trade_shim_note(now_ms(), TRADE_SHIM_NOTE_BRIDGE_STOP, (uint16_t)g.state, 0);
     ldn_udp_set_handler(NULL);
@@ -750,8 +765,29 @@ void pia_bridge_stop(void)
    adapter, dbgAnyRx stays set and pico_link leaves it alone. */
 static void bridge_restart(bool session_ended)
 {
+    if (!g.started) return;   /* VC-Adapter merge: once per stop, now that this returns */
     /* A hosted session can end on the GBA's side, with the Switch still in the room. */
     if (g.state == BR_HOST && g.member_index >= 0 && g.session_ms) print_session_summary();
+#if CONFIG_UDS_RFU_KEEP_ADAPTER
+    (void)session_ended;
+    if (g.state == BR_RUN && g.child_connected)
+    {
+        send_command(RFU1_DISCONNECT, g.child_devid);
+        trade_shim_note(now_ms(), TRADE_SHIM_NOTE_CHILD_DISCONNECT, 0, 0);
+        printf("LDN_BRIDGE told the GBA its partner has left\n");
+    }
+    else if (g.state == BR_HOST && g.client_connected)
+    {
+        send_command(RFU1_DISCONNECT, (uint32_t)g.client_devid | ((uint32_t)g.client_slot << 16));
+        printf("LDN_BRIDGE told the GBA the Switch has left its group\n");
+    }
+    /* Hosting leaves the radio stopped; the session stop in pia_bridge_stop then starts it
+       again as the joiner's station, which the room search needs. */
+    ldn_host_stop();
+    pia_bridge_stop();
+    s_restart_at = now_ms() + RESTART_PAUSE_MS;
+    printf("LDN_BRIDGE restarting the room search in place (the adapter stays up)\n");
+#else
     if (session_ended)
     {
         pico_link_set_mode();
@@ -760,6 +796,7 @@ static void bridge_restart(bool session_ended)
     }
     pia_bridge_stop();
     esp_restart();
+#endif
 }
 
 bool pia_bridge_running(void) { return g.started; }
@@ -856,6 +893,14 @@ static void hex_of(const uint8_t *data, size_t length, char *out)
 
 void pia_bridge_poll(void)
 {
+#if CONFIG_UDS_RFU_KEEP_ADAPTER
+    /* VC-Adapter merge: bridge_restart's restart in place. */
+    if (!g.started && s_restart_at && now_ms() >= s_restart_at)
+    {
+        s_restart_at = 0;
+        pia_bridge_start();
+    }
+#endif
     if (!g.started) return;
     int64_t now = now_ms();
 
@@ -1031,6 +1076,7 @@ void pia_bridge_poll(void)
             if (g.session_up) print_session_summary();
             trade_shim_note(now, TRADE_SHIM_NOTE_HOST_DISCONNECT, 0, 0);
             bridge_restart(true);
+            return;   /* VC-Adapter merge: bridge_restart can return */
         }
         if (!g.session_up && pia_conn_connected(&g.s.link.conn))
         {
@@ -1046,6 +1092,7 @@ void pia_bridge_poll(void)
             printf("LDN_BRIDGE network lost\n");
             if (g.session_up) print_session_summary();
             bridge_restart(false);
+            return;   /* VC-Adapter merge: bridge_restart can return */
         }
         /* Handshake timeout: the Switch goes quiet instead of refusing. */
         if (!pia_conn_connected(&g.s.link.conn) && now > g.deadline)

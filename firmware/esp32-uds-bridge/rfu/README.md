@@ -76,7 +76,12 @@ The telemetry the Pico sends twice a second (frames 0x0E, 0x2E, 0x1D, 0x1E) is s
 - Between commands the wait for SC runs in one go until the GBA has been silent 50 ms, instead of returning to the loop every
   100 us: a command's first word arrives unannounced, and a hardware test lost the first bit of ~2% of command headers
   (librfu then waits 130 ms before it retries, which backed up the Switch's data until frames were dropped and the game
-  reported a lost link).
+  reported a lost link). After that the waits last 1 ms, one per breath (they were 100 us; the one lost word in a whole
+  trading session was a search command after a quiet spell).
+- The adapter outlives the Switch side's sessions: the bridge restarts its room search in place rather than restarting the
+  board (`CONFIG_UDS_RFU_KEEP_ADAPTER`, see `../ldn/README.md`), and a session's end reaches the GBA as its partner
+  disconnecting. Restarting the board left a GBA leaving the trade room on a black screen, waiting for an event from an
+  adapter that was gone.
 - A word lost mid-way in the command phase is counted in the 0x1E telemetry's parked-loss field (the bridge's log calls
   it `park_drops`) and goes into the transfer recorder (comstate 15), whose first one is sent like a reset's. An SC that
   falls and stays low (no bit at all, as around the GBA's soft reset) is not counted.
