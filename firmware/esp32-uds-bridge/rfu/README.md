@@ -82,6 +82,10 @@ The telemetry the Pico sends twice a second (frames 0x0E, 0x2E, 0x1D, 0x1E) is s
   board (`CONFIG_UDS_RFU_KEEP_ADAPTER`, see `../ldn/README.md`), and a session's end reaches the GBA as its partner
   disconnecting. Restarting the board left a GBA leaving the trade room on a black screen, waiting for an event from an
   adapter that was gone.
+- With Ruby and Sapphire's cable (`CONFIG_UDS_RFU_CABLE`, `../cable`), the adapter holds SI high until the GBA first clocks
+  it, instead of mirroring SO from the start (the ID exchange has no handshake), and while the game is unknown it tries the
+  cable's handshake on SC and SD now and then; a Ruby or Sapphire that answers gets the port as its cable master. See
+  `../cable/README.md`.
 - A word lost mid-way in the command phase is counted in the 0x1E telemetry's parked-loss field (the bridge's log calls
   it `park_drops`) and goes into the transfer recorder (comstate 15), whose first one is sent like a reset's. An SC that
   falls and stays low (no bit at all, as around the GBA's soft reset) is not counted.

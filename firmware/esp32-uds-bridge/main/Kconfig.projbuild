@@ -38,6 +38,16 @@ config UDS_RFU_ADAPTER
         nothing else, with interrupts masked (no interrupt watchdog check on that core). The console's link port must be in GBA
         mode (3.3 V).
 
+config UDS_RFU_CABLE
+    bool "Switch side: Ruby and Sapphire on the link cable (RFU Cable Wrapper, in progress)"
+    depends on UDS_RFU_ADAPTER
+    default y
+    help
+        Ruby and Sapphire have only the link cable. With this, the board is to be their cable partner and carry the link to
+        the Switch's FireRed trade room as an FRLG child, as mGBA's RFU Cable Wrapper does (cable/: its wireless side,
+        rfu-wrapper-air.c, unchanged). In progress: the wireless side builds and passes its PC test, but the cable master and
+        the choice between the adapter and the cable are not written yet, so nothing runs it.
+
 config UDS_RFU_KEEP_ADAPTER
     bool "Adapter: keep it up when the Switch side's session ends (restart the bridge in place)"
     depends on UDS_RFU_ADAPTER

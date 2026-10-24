@@ -18,6 +18,10 @@
 #include "pia_bridge.h"
 #include "trade_shim.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
+#if CONFIG_UDS_RFU_CABLE
+#include "rfu_adapter.h"   /* VC-Adapter merge: LDN_CABLE_LOG */
+#endif
 #define printf ldn_wire_printf
 #define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 #define MACARGS(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
@@ -163,6 +167,9 @@ static int nibble(char c)
 }
 
 static void emit_line(const char *line) { printf("%s\n", line); }
+#if CONFIG_UDS_RFU_CABLE
+static void print_cable_line(const char *line) { printf("LDN_CABLE %s\n", line); }   /* VC-Adapter merge */
+#endif
 static bool s_dumping_log;
 
 static void command(const char *line)
@@ -231,6 +238,10 @@ static void command(const char *line)
     if (!strcmp(line, "LDN_BRIDGE_START")) { pia_bridge_start(); printf("LDN_BRIDGE_STARTED\n"); return; }
     if (!strcmp(line, "LDN_BRIDGE_STOP")) { pia_bridge_stop(); printf("LDN_BRIDGE_STOPPED\n"); return; }
     if (!strcmp(line, "LDN_SHIM_LOG")) { trade_shim_dump_begin(); s_dumping_log = true; return; }
+#if CONFIG_UDS_RFU_CABLE
+    /* VC-Adapter merge: the on-board cable for Ruby and Sapphire (../rfu, ../cable). */
+    if (!strcmp(line, "LDN_CABLE_LOG")) { rfu_adapter_cable_log(print_cable_line); printf("LDN_CABLE_LOG end\n"); return; }
+#endif
     if (!strcmp(line, "LDN_BRIDGE_STATUS")) {
         static char report[512];
         pia_bridge_status(report, sizeof(report));

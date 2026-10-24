@@ -10,7 +10,8 @@
  *   ldn-console [COMx] [command ...]
  *
  * With no port, the first Espressif board found. With no commands, the adapter's state: LDN_PICO_DATA, LDN_PICO_STATS,
- * LDN_PICO_STATUS and LDN_SHIM_LOG. Only text commands go out: no 3DS frame, so the board stays in its Switch mode.
+ * LDN_PICO_STATUS, LDN_CABLE_LOG (Ruby and Sapphire's cable; an error line on firmware without it) and LDN_SHIM_LOG. Only text
+ * commands go out: no 3DS frame, so the board stays in its Switch mode.
  */
 #include "esp32-serial.h"
 
@@ -39,7 +40,7 @@ static void _drain(struct Esp32Serial* port, DWORD forMs) {
 }
 
 int main(int argc, char** argv) {
-	static const char* const kDefault[] = {"LDN_PICO_DATA", "LDN_PICO_STATS", "LDN_PICO_STATUS", "LDN_SHIM_LOG"};
+	static const char* const kDefault[] = {"LDN_PICO_DATA", "LDN_PICO_STATS", "LDN_PICO_STATUS", "LDN_CABLE_LOG", "LDN_SHIM_LOG"};
 	char name[32] = "";
 	int first = 1;
 	if (argc > 1 && !_strnicmp(argv[1], "COM", 3)) {

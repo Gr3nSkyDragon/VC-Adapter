@@ -10,9 +10,19 @@ if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
     if(CONFIG_UDS_RFU_ADAPTER)
         set(rfu_sources "${CMAKE_CURRENT_LIST_DIR}/../../rfu/rfu_adapter.cpp")
     endif()
+    # Ruby and Sapphire's cable (../../cable, CONFIG_UDS_RFU_CABLE): mGBA's RFU Cable Wrapper, its wireless side unchanged and
+    # built against the stand-in mGBA headers in cable/compat.
+    set(cable_sources)
+    set(cable_private_includes)
+    if(CONFIG_UDS_RFU_CABLE)
+        set(cable_sources "${CMAKE_CURRENT_LIST_DIR}/../../cable/rfu-wrapper-air.c" "${CMAKE_CURRENT_LIST_DIR}/../../cable/cable_air.c"
+            "${CMAKE_CURRENT_LIST_DIR}/../../cable/cable_master.c")
+        set(cable_private_includes "${CMAKE_CURRENT_LIST_DIR}/../../cable/compat")
+    endif()
     idf_component_register(
-        SRCS ${BRIDGE_SOURCES} ${BRIDGE_TRANSPORT_USB} ${rfu_sources}
-        INCLUDE_DIRS "${BRIDGE_COMMON}" "${CMAKE_CURRENT_LIST_DIR}/../../rfu"
+        SRCS ${BRIDGE_SOURCES} ${BRIDGE_TRANSPORT_USB} ${rfu_sources} ${cable_sources}
+        INCLUDE_DIRS "${BRIDGE_COMMON}" "${CMAKE_CURRENT_LIST_DIR}/../../rfu" "${CMAKE_CURRENT_LIST_DIR}/../../cable"
+        PRIV_INCLUDE_DIRS ${cable_private_includes}
         REQUIRES ${BRIDGE_REQUIRES} esp_driver_usb_serial_jtag
         LDFRAGMENTS "linker.lf"
     )

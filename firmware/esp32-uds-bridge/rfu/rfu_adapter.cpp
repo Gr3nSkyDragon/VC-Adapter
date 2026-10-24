@@ -17,6 +17,8 @@
 #include "rfu_adapter.h"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -36,6 +38,15 @@
 #include "soc/gpio_struct.h"
 
 #include "rfuProtocol.hpp"
+
+// Ruby and Sapphire's cable (../cable): mGBA's RFU Cable Wrapper, with this board as the game's cable master.
+#if CONFIG_UDS_RFU_CABLE
+#include "cable_air.h"
+#include "cable_master.h"
+#if CONFIG_UDS_LINK_PORT_SD_GPIO < 0
+#error "CONFIG_UDS_RFU_CABLE needs SD (CONFIG_UDS_LINK_PORT_SD_GPIO): it is the multiplayer link's data line"
+#endif
+#endif
 
 // The link loop and its helpers in IRAM (CONFIG_UDS_RFU_GLUE_IRAM); listen and masterExchange always are.
 #if CONFIG_UDS_RFU_GLUE_IRAM
@@ -184,19 +195,50 @@ static volatile uint32_t s_windowsLate;
 
 enum DelivFail : uint8_t { dfNone = 0, dfDanceSoHigh = 3, dfFinalSoLow = 4 };
 
+#if CONFIG_UDS_RFU_CABLE
+// Which link the game on the port uses. Wireless games (FireRed, LeafGreen, Emerald) look for the adapter when the player
+// presses A on the main menu: the soft reset and the ID exchange. Ruby and Sapphire never do; their cable club opens a
+// multiplayer link as player 1 and waits for the master's handshake, which this side tries now and then while the game is
+// unknown (probeCable).
+enum Game : uint8_t { kGameUnknown, kGameWireless, kGameCable };
+static volatile uint8_t s_game;
+// The cable runs: s_coreSpace holds the wrapper's state, not the core, and the other core must not read the core.
+static std::atomic<bool> s_cable;
+static volatile bool s_cableLinked;
+static volatile uint32_t s_cablePackets, s_cableProbes, s_cableChecksumErrors, s_cableReopens;
+
+// The cable's log (LDN_CABLE_LOG): its link events and the wrapper's trace, written by the link task.
+static constexpr unsigned kCableLogLines = 16;
+static constexpr unsigned kCableLogChars = 100;
+static char s_cableLog[kCableLogLines][kCableLogChars];
+static std::atomic<uint32_t> s_cableLogCount;
+#endif
+
 //-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////-//
 // The link task (second core). Everything below until the bridge side runs there only.
 //-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////-//
 
 // Built in place by resetCore. A plain static RfuCore would go in .data (its members have initializers), and this file's static
-// data has to be in .bss, which the 3DS side takes for its heap (components/ldn_bridge/linker.lf).
-alignas(rfuproto::RfuCore) static uint8_t s_coreSpace[sizeof(rfuproto::RfuCore)];
+// data has to be in .bss, which the 3DS side takes for its heap (components/ldn_bridge/linker.lf). While the cable runs the
+// wrapper's wireless side has it instead (only one of them runs at a time).
+#if CONFIG_UDS_RFU_CABLE
+static constexpr size_t kCableAirBytes = CABLE_AIR_STATE_BYTES;
+static constexpr size_t kCoreSpace = sizeof(rfuproto::RfuCore) > kCableAirBytes ? sizeof(rfuproto::RfuCore) : kCableAirBytes;
+#else
+static constexpr size_t kCoreSpace = sizeof(rfuproto::RfuCore);
+#endif
+alignas(alignof(rfuproto::RfuCore) > alignof(std::max_align_t) ? alignof(rfuproto::RfuCore) : alignof(std::max_align_t))
+    static uint8_t s_coreSpace[kCoreSpace];
 alignas(rfuproto::Rfu1StreamParser) static uint8_t s_parserSpace[sizeof(rfuproto::Rfu1StreamParser)];
 #define g_core (*reinterpret_cast<rfuproto::RfuCore*>(s_coreSpace))
 #define g_parser (*reinterpret_cast<rfuproto::Rfu1StreamParser*>(s_parserSpace))
 
 // Dedicated GPIO channel masks.
 static uint32_t s_scM, s_rxM, s_sdM, s_txM;
+// s_txM while SI is held high instead of mirroring SO (listen): until the GBA has clocked the adapter. The ID exchange has no
+// handshake (librfu_sio32id.c), and a Ruby or Sapphire opening its cable link takes SI low for "I am the master": held high,
+// it is player 1, the child, and waits for this side's handshake.
+static uint32_t s_holdSi;
 
 static uint32_t s_staged;
 static uint32_t s_wordEndCc;    // when the last GBA-master word ended (listen)
@@ -283,6 +325,13 @@ static void GLUE_IRAM onFrame(void*, uint32_t ptype, uint32_t hdata, const uint8
 {
     const uint32_t now = nowMs();
     s_lastNetRxMs = now ? now : 1;
+#if CONFIG_UDS_RFU_CABLE
+    if (s_cable.load(std::memory_order_relaxed))
+    {
+        cable_air_net_packet(ptype, hdata, payload, payloadLen, now);
+        return;
+    }
+#endif
     g_core.applyNetPacket(ptype, hdata, payload, payloadLen, now);
 }
 
@@ -365,6 +414,7 @@ static int IRAM_ATTR __attribute__((noinline)) listen(uint32_t word, uint32_t bu
 {
     const uint32_t start = ccount();
     const uint32_t away = start - s_listenExitCc;
+    const uint32_t hold = s_holdSi;
     uint32_t passes = 0;
     uint32_t v;
     // SC is looked at between every step of the loop. Its first rise reaches this side late and briefly: through the level
@@ -375,7 +425,7 @@ static int IRAM_ATTR __attribute__((noinline)) listen(uint32_t word, uint32_t bu
     {
         v = rd();
         if (!(v & s_scM)) break;
-        dedic_gpio_cpu_ll_write_mask(s_txM, (v & s_rxM) ? 0 : s_txM);
+        dedic_gpio_cpu_ll_write_mask(s_txM, ((v & s_rxM) ? 0 : s_txM) | hold);
         if (!(rd() & s_scM)) break;
         if (s_sdM)
         {
@@ -506,8 +556,16 @@ static bool GLUE_IRAM waitSo(bool high, uint32_t timeoutUs)
     }
 }
 
+#if CONFIG_UDS_RFU_CABLE
+static uint32_t s_probeNotBeforeMs;
+#endif
+
 static void GLUE_IRAM sdReset(uint32_t now)
 {
+#if CONFIG_UDS_RFU_CABLE
+    // A game resetting the adapter is about to clock its ID exchange: no cable handshake on SC meanwhile.
+    s_probeNotBeforeMs = now + 5000;
+#endif
     snapshot(1);
     g_core.onSdReset(now);
     s_sdResets = s_sdResets + 1;
@@ -532,6 +590,12 @@ static void GLUE_IRAM onWord(uint32_t rx, uint32_t now)
     g_core.onSlaveTransfer(rx, now);
     if (g_core.counters.loginRestarts != loginRestarts) snapshot(2);
     s_staged = g_core.stagedTx;
+#if CONFIG_UDS_RFU_CABLE
+    // A game that clocks the adapter is a wireless one; one that finished the ID exchange stays that for the session. SI
+    // mirrors SO from its first word: its commands' handshake needs it.
+    if (s_game == kGameUnknown && g_core.dbgNintendo) s_game = kGameWireless;
+    s_holdSi = 0;
+#endif
 }
 
 // A word lost mid-way (listen's kSlip). In the command phase the GBA finished it anyway and goes on to the next, so the core,
@@ -690,6 +754,244 @@ static void GLUE_IRAM serveWait()
         runDelivery();
 }
 
+#if CONFIG_UDS_RFU_CABLE
+//-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////-//
+// Ruby and Sapphire's cable: this side is the multiplayer link's master (player 0), the game player 1. A transfer: SC low for
+// its length; the master's word on SD, UART-like at 115200 bps (start bit, 16 bits LSB first, stop bit); then the master
+// takes the game's SI low, and the game answers on SD the same way; SI and SC go high again. SC and SD are driven only low
+// (output enabled with the level at 0) and otherwise let go to the pull-ups, so a GBA driving them never fights a high.
+//-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////-//
+
+// Half a bit at 115200 bps, in CPU cycles, 8.8 fixed point.
+static constexpr uint32_t kCableHalfBitQ8 = static_cast<uint32_t>((uint64_t(kMhz) * 1000000u * 256u) / (2u * 115200u));
+static constexpr uint32_t cableHalfBits(uint32_t n) { return (n * kCableHalfBitQ8) >> 8; }
+// How long the game has to start its word once its SI is low (GB-Link's master waits ~500 us).
+static constexpr uint32_t kCableAnswerTimeout = us(500);
+// The game is tried only once the adapter has been on the wire this long (a GBA boots and shows its title meanwhile), at most
+// this often, and with every line idle.
+static constexpr uint32_t kProbeAfterMs = 10000;
+static constexpr uint32_t kProbeEveryMs = 250;
+// Every line low this long while this side lets go of them: the console is off.
+static constexpr uint32_t kConsoleOffMs = 500;
+
+static uint32_t s_sessionStartMs, s_lastProbeMs;
+static cable_master s_master;
+
+static inline void IRAM_ATTR waitUntil(uint32_t cc)
+{
+    while (static_cast<int32_t>(ccount() - cc) < 0) { }
+}
+
+static inline void IRAM_ATTR sdLow(bool low)
+{
+    if (low)
+        gpio_ll_output_enable(&GPIO, PIN_SD);
+    else
+        gpio_ll_output_disable(&GPIO, PIN_SD);
+}
+
+static inline void IRAM_ATTR scLow(bool low)
+{
+    if (low)
+        gpio_ll_output_enable(&GPIO, PIN_SC);
+    else
+        gpio_ll_output_disable(&GPIO, PIN_SC);
+}
+
+// The pins for the cable (on) or back for the adapter: SC's latch is low for the cable, high for the adapter's deliveries
+// (takeSc); SD loses its pull-down, which would load the multiplayer data line. SI high: the game is the child.
+static void GLUE_IRAM cablePins(bool on)
+{
+    sdLow(false);
+    scLow(false);
+    gpio_ll_set_level(&GPIO, PIN_SC, on ? 0 : 1);
+    if (on)
+        gpio_ll_pulldown_dis(&GPIO, PIN_SD);
+    else
+        gpio_ll_pulldown_en(&GPIO, PIN_SD);
+    tx(true);
+}
+
+// One multiplayer transfer: `out` from the master, *in from the game. False: the game did not answer (0xFFFF, as a missing
+// player reads on the real link).
+static bool IRAM_ATTR __attribute__((noinline)) cableExchange(uint16_t out, uint16_t* in)
+{
+    const uint32_t t0 = ccount();
+    scLow(true);  // the transfer starts
+    sdLow(true);  // start bit
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        waitUntil(t0 + cableHalfBits(2 + 2 * i));
+        sdLow(!((out >> i) & 1));
+    }
+    waitUntil(t0 + cableHalfBits(34));
+    sdLow(false);  // stop bit
+    waitUntil(t0 + cableHalfBits(36));
+    tx(false);     // the game's turn
+
+    bool answered = false;
+    uint16_t word = 0xFFFF;
+    const uint32_t w0 = ccount();
+    uint32_t ts = 0;
+    while (ccount() - w0 < kCableAnswerTimeout)
+        if (!(rd() & s_sdM))
+        {
+            ts = ccount();
+            answered = true;
+            break;
+        }
+    if (answered)
+    {
+        // Each bit in its middle, one and a half bits after the start bit's edge and then a bit apart: three reads a
+        // microsecond apart, the majority taken, so a spike on the line does not flip it.
+        word = 0;
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            const uint32_t middle = ts + cableHalfBits(3 + 2 * i);
+            waitUntil(middle - us(1));
+            uint32_t ones = (rd() & s_sdM) ? 1 : 0;
+            waitUntil(middle);
+            ones += (rd() & s_sdM) ? 1 : 0;
+            waitUntil(middle + us(1));
+            ones += (rd() & s_sdM) ? 1 : 0;
+            if (ones >= 2) word |= static_cast<uint16_t>(1u << i);
+        }
+        waitUntil(ts + cableHalfBits(35));  // its stop bit
+    }
+    tx(true);
+    spin(cableHalfBits(4));
+    scLow(false);
+    *in = word;
+    return answered;
+}
+
+static void cableLog(const char* text)
+{
+    const uint32_t n = s_cableLogCount.load(std::memory_order_relaxed);
+    char* line = s_cableLog[n % kCableLogLines];
+    // "<seconds>.<ms> text", without the C library's printf (this core runs with interrupts masked).
+    uint32_t ms = nowMs();
+    char digits[10];
+    unsigned count = 0;
+    uint32_t s = ms / 1000;
+    do
+    {
+        digits[count++] = static_cast<char>('0' + s % 10);
+        s /= 10;
+    } while (s && count < sizeof(digits));
+    unsigned at = 0;
+    while (count) line[at++] = digits[--count];
+    line[at++] = '.';
+    line[at++] = static_cast<char>('0' + (ms / 100) % 10);
+    line[at++] = static_cast<char>('0' + (ms / 10) % 10);
+    line[at++] = static_cast<char>('0' + ms % 10);
+    line[at++] = ' ';
+    while (*text && at + 1 < kCableLogChars) line[at++] = *text++;
+    line[at] = '\0';
+    s_cableLogCount.store(n + 1, std::memory_order_release);
+}
+
+static void cableEmit(const uint8_t* frame, size_t length)
+{
+    if (!s_toNet.put(frame, length)) s_outDrops = s_outDrops + 1;
+}
+
+static void cableGameCommand(void*, const uint16_t command[CABLE_CMD_WORDS]) { cable_air_game_command(command); }
+static bool cableNextCommand(void*, uint16_t command[CABLE_CMD_WORDS]) { return cable_air_next_command(command); }
+static void cableReset(void*) { cable_air_cable_reset(); }
+static void cableNote(void*, const char* text) { cableLog(text); }
+
+// While the game is unknown and the port quiet: the master's handshake, which a Ruby or Sapphire in its cable club answers.
+// The GBA's SC is an input then (a wireless game drives it only for the adapter, after its soft reset), and SD is driven only
+// low, for a few bits.
+static bool GLUE_IRAM probeCable()
+{
+    if ((rd() & (s_scM | s_sdM)) != (s_scM | s_sdM)) return false;  // something holds SC or SD low: the console is off
+    cablePins(true);
+    uint16_t reply;
+    const bool answered = cableExchange(CABLE_MASTER_HANDSHAKE, &reply);
+    cablePins(false);
+    s_cableProbes = s_cableProbes + 1;
+    return answered && (reply & ~3) == CABLE_SLAVE_HANDSHAKE;
+}
+
+// The cable link, until the console goes off or the bridge stops the adapter. One packet per GBA frame: the checksum, then the
+// eight words of a command 751 us apart (the master's timer in the game); between transfers the bridge's frames go to the
+// wrapper, and once a frame the wrapper runs.
+static void GLUE_IRAM __attribute__((noinline)) cableSession(uint32_t gen)
+{
+    s_cable.store(true, std::memory_order_release);  // the other core stops reading the core before its memory is reused
+    s_cableLinked = false;
+    s_cablePackets = 0;
+    cableLog("cable: the game answered the cable handshake: Ruby or Sapphire, with this board as its cable partner");
+    cable_air_set_trace(&cableLog);
+    if (!cable_air_start(&cableEmit, nowMs(), s_coreSpace, sizeof(s_coreSpace)))
+    {
+        cableLog("cable: the wireless side did not fit its memory");
+        cable_air_set_trace(nullptr);
+        s_cable.store(false, std::memory_order_release);
+        return;
+    }
+    static const cable_peer peer = {nullptr, &cableGameCommand, &cableNextCommand, &cableReset, &cableNote};
+    cable_master_init(&s_master, &peer);
+    cable_master_handshake_answered(&s_master);  // the probe was the game's first handshake
+    cablePins(true);
+
+    uint32_t frameStart = ccount();
+    uint32_t next = frameStart;
+    uint32_t lowSinceMs = 0;
+    bool low = false;
+    cable_air_frame(nowMs());
+    while (s_want.load(std::memory_order_acquire) && s_gen.load(std::memory_order_acquire) == gen)
+    {
+        const uint32_t now = nowMs();
+        {
+            uint8_t bytes[kWorkBytes];
+            const size_t n = s_fromNet.get(bytes, sizeof(bytes));
+            if (n) g_parser.push(bytes, n);
+        }
+        if (static_cast<int32_t>(ccount() - frameStart) >= static_cast<int32_t>(us(CABLE_FRAME_US)))
+        {
+            frameStart += us(CABLE_FRAME_US);
+            if (static_cast<int32_t>(ccount() - frameStart) >= static_cast<int32_t>(us(CABLE_FRAME_US)))
+                frameStart = ccount();  // fell behind (a long flash access): start the frames again from now
+            cable_air_frame(now);
+        }
+        breathe(now);
+        if (!(rd() & (s_scM | s_sdM | s_rxM)))
+        {
+            if (!low)
+            {
+                low = true;
+                lowSinceMs = now;
+            }
+            else if (now - lowSinceMs >= kConsoleOffMs)
+            {
+                cableLog("cable: every line is low: the console is off");
+                break;
+            }
+        }
+        else
+            low = false;
+        if (static_cast<int32_t>(ccount() - next) < 0) continue;
+
+        uint16_t reply;
+        const bool answered = cableExchange(cable_master_word(&s_master), &reply);
+        const cable_next n = cable_master_done(&s_master, reply, answered);
+        s_cableLinked = s_master.linked;
+        s_cablePackets = s_master.packets;
+        s_cableChecksumErrors = s_master.checksumErrors;
+        s_cableReopens = s_master.reopens;
+        next = n == CABLE_NEXT_GAP ? ccount() + us(CABLE_TRANSFER_GAP_US) : frameStart + us(CABLE_FRAME_US);
+    }
+    cablePins(false);
+    cable_air_stop();
+    cable_air_set_trace(nullptr);
+    s_cableLinked = false;
+    s_cable.store(false, std::memory_order_release);
+}
+#endif
+
 static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
 {
     resetCore();
@@ -697,6 +999,13 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
     tx(true);
     releaseSc();
     s_onWire = true;
+#if CONFIG_UDS_RFU_CABLE
+    s_game = kGameUnknown;
+    s_holdSi = s_txM;
+    s_sessionStartMs = nowMs();
+    s_lastProbeMs = 0;
+    s_probeNotBeforeMs = 0;
+#endif
 
     bool holding = false;  // a command-phase word just ended: the GBA waits in its handshake
     s_irqLevel = portSET_INTERRUPT_MASK_FROM_ISR();
@@ -749,6 +1058,25 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
             const uint32_t now = nowMs();
             work(now, kWorkBytes);
             breathe(now);
+#if CONFIG_UDS_RFU_CABLE
+            if (s_game == kGameUnknown && !g_core.dbgAnyRx && now - s_sessionStartMs >= kProbeAfterMs &&
+                now - s_lastProbeMs >= kProbeEveryMs && static_cast<int32_t>(now - s_probeNotBeforeMs) >= 0)
+            {
+                s_lastProbeMs = now;
+                if (probeCable())
+                {
+                    s_game = kGameCable;
+                    cableSession(gen);
+                    // Back to the adapter: a fresh core in the memory the wrapper had, and the game unknown again.
+                    resetCore();
+                    tx(true);
+                    releaseSc();
+                    s_game = kGameUnknown;
+                    s_holdSi = s_txM;
+                    s_sessionStartMs = nowMs();
+                }
+            }
+#endif
             continue;
         }
         const uint32_t now = nowMs();
@@ -796,6 +1124,13 @@ static void linkTask(void*)
     esp_rom_gpio_connect_out_signal(PIN_SC, SIG_GPIO_OUT_IDX, false, false);
     gpio_ll_set_output_enable_ctrl(&GPIO, PIN_SC, false, false);
     gpio_ll_output_disable(&GPIO, PIN_SC);
+#if CONFIG_UDS_RFU_CABLE
+    // SD too, for the cable's data line: latch low, the output enabled only to pull it low (cablePins, cableExchange).
+    gpio_ll_set_level(&GPIO, PIN_SD, 0);
+    esp_rom_gpio_connect_out_signal(PIN_SD, SIG_GPIO_OUT_IDX, false, false);
+    gpio_ll_set_output_enable_ctrl(&GPIO, PIN_SD, false, false);
+    gpio_ll_output_disable(&GPIO, PIN_SD);
+#endif
 
     // A ringing clock edge read as two is a lost word; the filter drops pulses under two IO MUX clocks. SO and SD carry the
     // same spikes, which GB-Link's ESP32 adapter filters too.
@@ -967,6 +1302,17 @@ static void put32(uint8_t* o, uint32_t v)
 // The core is read from this core while the link task changes it; a torn counter in a log is the worst of it.
 static void queueTelemetry()
 {
+#if CONFIG_UDS_RFU_CABLE
+    if (s_cable.load(std::memory_order_acquire))
+    {
+        // The core's memory is the wrapper's now. Only the adapter report pico_link reads: "a GBA is linked" (it then leaves
+        // the adapter alone), the cable's packet count in the transfer count's place.
+        uint8_t c[16] = {0x0E, 1, 0, 0};
+        put32(c + 12, s_cablePackets);
+        queueFrame(kChannelData, c, sizeof(c));
+        return;
+    }
+#endif
     uint8_t d[16] = {0x0E, static_cast<uint8_t>(g_core.dbgAnyRx ? 1 : 0), static_cast<uint8_t>(g_core.dbgNintendo ? 1 : 0),
                      static_cast<uint8_t>(g_core.comstate)};
     put32(d + 4, g_core.dbgFirstRx);
@@ -1108,6 +1454,12 @@ static void updateLed(uint32_t now)
     bool lit;
     if (!s_onWire)
         lit = false;
+#if CONFIG_UDS_RFU_CABLE
+    // The cable: two blips a second while it waits for the game's handshake; linked, on like a found adapter.
+    else if (s_cable.load(std::memory_order_acquire))
+        lit = s_cableLinked ? !(s_lastNetRxMs && now - s_lastNetRxMs < 1000 && now % 1000 < 100)
+                            : (now % 1000 < 60 || (now % 1000 >= 200 && now % 1000 < 260));
+#endif
     else if (g_core.comstate >= rfuproto::comWaitCmd)
         lit = !(s_lastNetRxMs && now - s_lastNetRxMs < 1000 && now % 1000 < 100);
     else if (g_core.dbgNintendo)
@@ -1140,6 +1492,28 @@ extern "C" void rfu_adapter_stop(void)
 {
     s_want.store(false, std::memory_order_release);
 }
+
+#if CONFIG_UDS_RFU_CABLE
+extern "C" void rfu_adapter_cable_log(void (*print)(const char* line))
+{
+    static const char* const kGames[] = {"unknown", "wireless", "cable"};
+    char head[128];
+    std::snprintf(head, sizeof(head), "game=%s cable=%d linked=%d packets=%u reopens=%u checksum_errors=%u probes=%u",
+                  kGames[s_game % 3], s_cable.load() ? 1 : 0, s_cableLinked ? 1 : 0, static_cast<unsigned>(s_cablePackets),
+                  static_cast<unsigned>(s_cableReopens), static_cast<unsigned>(s_cableChecksumErrors),
+                  static_cast<unsigned>(s_cableProbes));
+    print(head);
+    const uint32_t count = s_cableLogCount.load(std::memory_order_acquire);
+    const uint32_t first = count > kCableLogLines ? count - kCableLogLines : 0;
+    for (uint32_t i = first; i < count; ++i)
+    {
+        char line[kCableLogChars];
+        std::memcpy(line, s_cableLog[i % kCableLogLines], sizeof(line));  // a line being written now may show torn
+        line[sizeof(line) - 1] = '\0';
+        print(line);
+    }
+}
+#endif
 
 extern "C" void rfu_adapter_write(const uint8_t* bytes, size_t length)
 {
