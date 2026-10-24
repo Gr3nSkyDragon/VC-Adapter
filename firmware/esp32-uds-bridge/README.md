@@ -24,11 +24,12 @@ One codebase, two builds (`package-release-bin.ps1`, see "Build and flash"):
 | Profile | Firmware | For | What it has |
 | --- | --- | --- | --- |
 | **1**, `gblink` | **1.8** | A board on a PC's or phone's USB: Azahar, mGBA, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks |
-| **2**, `vcadapter` | **1.9 (beta)** | The VC-Adapter board, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the link port, running on its own. Game Boy only for now: no Switch side until the board has a GBA side of its own |
+| **2**, `vcadapter` | **2.0** | The VC-Adapter board, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the Switch side on the link port, running on its own: Game Boy games through the 3DS side, FireRed, LeafGreen and Emerald through the GBA Wireless Adapter emulated on the port (`rfu/`), Ruby and Sapphire through their link cable (`cable/`) |
 
 The profile is a set of menuconfig choices: `sdkconfig.defaults` is profile 1, `sdkconfig.defaults` + `sdkconfig.vcadapter`
-profile 2 (`CONFIG_UDS_LINK_PORT` on, `CONFIG_UDS_SWITCH_LDN` off). The firmware reports its version, 1.8 or 1.9, from
-`CONFIG_UDS_FIRMWARE_MINOR`, which follows the profile.
+profile 2 (`CONFIG_UDS_LINK_PORT` and `CONFIG_UDS_SWITCH_LDN` on, the Switch side's GBA end on the port). The firmware reports its
+version, 1.8 or 2.0, from `CONFIG_UDS_FIRMWARE_MAJOR` and `_MINOR`, which follow the profile. 1.9 was profile 2's first build,
+Game Boy only (`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`); 2.0's image drops the profile from its name.
 
 ## Two modes: 3DS and Switch (firmware 1.8)
 
@@ -82,9 +83,9 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
   --size 48` for colour Pokemon sprites; it prints each picture in the terminal, and `--preview
   out.png` writes it enlarged.
 
-### GBA link port, no GB-Link (firmware 1.9, beta)
+### GBA link port, no GB-Link (firmware 1.9 on)
 
-The **VC-Adapter board build** (`esp32-uds-bridge-fw<version>-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
+The **VC-Adapter board build** (`esp32-uds-bridge-fw2.0-esp32s3.bin`; 1.9 was `...-fw1.9-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
 `CONFIG_UDS_LINK_PORT`, menuconfig's UDS bridge > **Game Boy link port wired to GPIOs**) needs no GB-Link: a GBA (playing a GB/GBC cartridge), GBC or Game Boy link port is wired to four GPIOs through a level
 shifter, and the board clocks the cartridge itself, as the GB-Link's Pico did (the board the master, the cartridge the slave;
 `main/linkport.c`). Each byte goes out in one piece at 262144 Hz (`CONFIG_UDS_LINK_PORT_CLOCK_HZ`; the Pico clocks at about
@@ -138,15 +139,15 @@ its log.
 Each release ships one file per build (bootloader, partition table and app merged):
 `esp32-uds-bridge-fw1.8-esp32s3-gblink.bin`, **firmware 1.8**, for a board on the PC's or phone's USB (Azahar, mGBA, a GB-Link
 through uds-gblink-relay; the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks), and
-`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`, **firmware 1.9 (beta)**, for the VC-Adapter board on the console's link port
-(Game Boy side only for now). Images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build without the
-Switch side. Either file is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**: store them again
+`esp32-uds-bridge-fw2.0-esp32s3.bin`, **firmware 2.0**, for the VC-Adapter board on the console's link port (the 3DS side and
+the Switch side; 1.9, `esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`, was Game Boy only). Images from before 1.8
+(`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build without the Switch side. Either file is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**: store them again
 after flashing. Plug the board in through its **native USB port** (the one that shows up as an Espressif USB Serial/JTAG
 device) and use one of these:
 
 **With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It flashes the firmware and then stores the
 keys in one go (each step can be done on its own): pick **Build for** (GB-Link + Switch, firmware 1.8, or the VC-Adapter board,
-1.9; the newest `.bin` of that build beside it is filled in, and it asks before flashing an image of the other build), the 3DS
+2.0; the newest `.bin` of that build beside it is filled in, and it asks before flashing an image of the other build), the 3DS
 key from your `aes_keys.txt`, the four Switch keys from your `prod.keys` (`aes_kek_generation_source`,
 `aes_key_generation_source`, `master_key_00`, `master_key_12`) that the Switch side needs, and the board, and press Start. Only
 those 16-byte keys are sent to the board (3DS slot 0x2D; the Switch keys in slots 0x80 to 0x83, which the firmware keeps where
@@ -173,7 +174,7 @@ The merged file was verified by flashing it to a real ESP32-S3 with esptool and 
 
 To produce the merged files for a new release, run `package-release-bin.ps1` with ESP-IDF 6.1 set up (see below): it builds
 both profiles (`-Profile 1` or `-Profile 2` for one), each in its own `build-<profile>` folder, and writes them to the
-repository's `release/`. The build's name is also in the app's version (`1.9-vcadapter`), which uds-esp32-setup reads, and the firmware says
+repository's `release/`. The build's name is also in the app's version (`2.0-vcadapter`), which uds-esp32-setup reads, and the firmware says
 it in HELLO_ACK's features byte (1.8 on).
 
 ## Build and flash
@@ -187,7 +188,7 @@ both release images:
 cd firmware/esp32-uds-bridge
 .\package-release-bin.ps1               # both profiles into ../../release
 .\package-release-bin.ps1 -Profile 1    # firmware 1.8 only: esp32-uds-bridge-fw1.8-esp32s3-gblink.bin
-.\package-release-bin.ps1 -Profile 2    # firmware 1.9 only: esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin
+.\package-release-bin.ps1 -Profile 2    # firmware 2.0 only: esp32-uds-bridge-fw2.0-esp32s3.bin
 ```
 
 Or by hand with `idf.py`, each profile in a folder of its own:

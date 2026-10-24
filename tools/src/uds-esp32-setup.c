@@ -15,9 +15,10 @@
  * moves the board over, and checks that its Switch side answers. Hosts move it back and forth later as before.
  *
  * The firmware comes in two builds (package-release-bin.ps1): firmware 1.8, the GB-Link build (3DS and Switch sides), for a board
- * on the PC's USB with a GB-Link, and firmware 1.9, the VC-Adapter board build (beta, Game Boy side only), for a board wired to the
- * console's link port. The "Build for" choice picks the newest image of that build next to this program; an image's build is read
- * from its version (1.9-vcadapter), and an image from before the split counts as the GB-Link build.
+ * on the PC's USB with a GB-Link, and firmware 2.0, the VC-Adapter board build (3DS and Switch sides on the console's link port), for
+ * a board wired to the port (its first build, 1.9, was Game Boy only). The "Build for" choice picks the newest image of that build
+ * next to this program; an image's build is read from its version (2.0-vcadapter), and an image from before the split counts as the
+ * GB-Link build.
  *
  * Windows only (Win32, no other dependencies). Build target: uds-esp32-setup.
  */
@@ -109,7 +110,7 @@ static const char* _buildName(enum Build build) {
 	return build == BUILD_VCADAPTER ? "VC-Adapter board build" : build == BUILD_GBLINK ? "GB-Link build" : "build not marked";
 }
 
-// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "1.9-vcadapter"). Unmarked: from before the
+// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "2.0-vcadapter"). Unmarked: from before the
 // split, or built by hand with idf.py.
 static enum Build _imageBuild(const struct UDSFlashImageInfo* info) {
 	if (strstr(info->version, "-vcadapter")) {
@@ -604,11 +605,12 @@ static HWND _control(const char* cls, const char* text, DWORD style, int id, int
 	return hwnd;
 }
 
-// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them. Images from before
-// the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are GB-Link builds.
+// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them. Unmarked names:
+// 1.x from before the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are GB-Link builds, 2.x (esp32-uds-bridge-fw2.0-esp32s3.bin) are
+// the VC-Adapter board's, which dropped the profile from its name; 1.9 was ...-fw1.9-esp32s3-vcadapter.bin.
 static void _defaultFirmware(enum Build build, char* out, size_t capacity) {
-	static const char* const kGbLink[] = {"esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw*-esp32s3.bin"};
-	static const char* const kVcAdapter[] = {"esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
+	static const char* const kGbLink[] = {"esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw1*-esp32s3.bin"};
+	static const char* const kVcAdapter[] = {"esp32-uds-bridge-fw2*-esp32s3.bin", "esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
 	const char* const* patterns = build == BUILD_VCADAPTER ? kVcAdapter : kGbLink;
 	size_t count = build == BUILD_VCADAPTER ? sizeof(kVcAdapter) / sizeof(kVcAdapter[0]) : sizeof(kGbLink) / sizeof(kGbLink[0]);
 	char dir[MAX_PATH];
@@ -702,7 +704,7 @@ static void _create(void) {
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
 	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
 	_control("BUTTON", "GB-Link + Switch (firmware 1.8)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
-	_control("BUTTON", "VC-Adapter board, beta (1.9)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
+	_control("BUTTON", "VC-Adapter board (firmware 2.0)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
 	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 142, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 141, 100, 26);

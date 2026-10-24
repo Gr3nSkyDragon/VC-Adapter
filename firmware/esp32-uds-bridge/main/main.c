@@ -23,8 +23,8 @@
 #include "radio.h"
 #include "uds_wire.h"
 
-#define FW_MAJOR 1
-#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR /* 1.8 the GB-Link build, 1.9 the VC-Adapter board build (Kconfig.projbuild) */
+#define FW_MAJOR CONFIG_UDS_FIRMWARE_MAJOR /* 1.8 the GB-Link build, 2.0 the VC-Adapter board build (Kconfig.projbuild) */
+#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR
 #define PROTOCOL_VERSION UDS_WIRE_VERSION
 
 /* What this build was made with, for HELLO_ACK: the VC-Adapter board profile has the link port, the GB-Link profile neither. */

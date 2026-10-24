@@ -8,13 +8,21 @@ config UDS_SWITCH_LDN
         side drives a GB-Link Pico (on the UART, or through a host) in the GB-Link profile; on the VC-Adapter board the wireless
         adapter is emulated on the link port pins instead (UDS_RFU_ADAPTER). Ignored with ESP-IDF 5.x, which cannot build it.
 
+config UDS_FIRMWARE_MAJOR
+    int
+    default 2 if UDS_LINK_PORT
+    default 1
+    help
+        The firmware's version is <this>.<UDS_FIRMWARE_MINOR>, by profile: 1.8 the GB-Link build (3DS side + Switch side), 2.0 the
+        VC-Adapter board build (the link port on its own: the 3DS side for Game Boy games, the Switch side for GBA games, through
+        the emulated Wireless Adapter or, for Ruby and Sapphire, the cable). 1.9 was that board's first build, Game Boy side only.
+
 config UDS_FIRMWARE_MINOR
     int
-    default 9 if UDS_LINK_PORT
+    default 0 if UDS_LINK_PORT
     default 8
     help
-        The firmware's version is 1.<this>, by profile: 1.8 the GB-Link build (3DS side + Switch side), 1.9 the VC-Adapter board
-        build (link port; beta, Game Boy side only).
+        See UDS_FIRMWARE_MAJOR.
 
 config UDS_LINK_PORT
     bool "Game Boy link port wired to GPIOs (no GB-Link)"
