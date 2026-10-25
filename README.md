@@ -16,8 +16,9 @@ One codebase, two builds (`firmware/esp32-uds-bridge`, `package-release-bin.ps1 
 | Switching | By what the host speaks, both ways, no power cycle | The same; with no host, the side it was last left in |
 | Image | `esp32-uds-bridge-fw1.8-esp32s3-gblink.bin` | `esp32-uds-bridge-fw2.0-esp32s3.bin` |
 
-Firmware 2.0's Switch side has traded on hardware (FireRed with the Switch, and Ruby through the cable); its 3DS side has not
-been tested again since 1.9, the board's first, Game Boy only build (`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`).
+Firmware 2.0 on hardware: the Switch side has traded both ways round (the Switch leading a group and the GBA leading one) with
+FireRed and Emerald, and with Ruby through the cable, repeated trade room visits and cartridge swaps included; the 3DS side
+has traded a Gen 1 cartridge with Virtual Console. Not yet tried on 2.0: other activities than trading (battles), and Gen 2.
 
 Release images and `uds-esp32-setup.exe` (which flashes an image and stores the keys the board needs) are on the Releases page.
 See `firmware/esp32-uds-bridge/README.md` for the hardware, flashing, the protocol and what has been verified.

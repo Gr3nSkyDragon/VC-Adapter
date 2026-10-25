@@ -21,14 +21,27 @@ static int slot_of(const char *name)
     return -1;
 }
 
+/* VC-Adapter merge: the keys are read from flash once and kept here, kept in step by ldn_keys_store and ldn_keys_erase (the
+   only writers of the namespace). With the GBA's adapter on the other core, interrupts masked, each flash read waits for that
+   core to let them in: a key derivation (three reads) took about 200 ms, and a room the GBA leads answered a Switch's
+   authentication in 400 to 800 ms, after the Switch had given up (it asks every 200 ms, five times). */
+static struct { bool loaded, present; uint8_t key[16]; } s_cache[KEY_COUNT];
+
 static bool load_key(int slot, uint8_t out[16])
 {
-    nvs_handle_t h;
-    if (nvs_open(KEY_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
-    size_t length = 16;
-    bool ok = nvs_get_blob(h, kSlots[slot], out, &length) == ESP_OK && length == 16;
-    nvs_close(h);
-    return ok;
+    if (!s_cache[slot].loaded)
+    {
+        nvs_handle_t h;
+        if (nvs_open(KEY_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+        size_t length = 16;
+        s_cache[slot].present = nvs_get_blob(h, kSlots[slot], s_cache[slot].key, &length) == ESP_OK && length == 16;
+        nvs_close(h);
+        s_cache[slot].loaded = true;
+        if (!s_cache[slot].present) memset(s_cache[slot].key, 0, 16);
+    }
+    if (!s_cache[slot].present) return false;
+    memcpy(out, s_cache[slot].key, 16);
+    return true;
 }
 
 static bool have_key(int slot)
@@ -47,6 +60,7 @@ bool ldn_keys_store(const char *name, const uint8_t value[16])
     if (nvs_open(KEY_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
     bool ok = nvs_set_blob(h, kSlots[slot], value, 16) == ESP_OK && nvs_commit(h) == ESP_OK;
     nvs_close(h);
+    s_cache[slot].loaded = false;   /* VC-Adapter merge: read back from flash next time */
     return ok;
 }
 
@@ -70,6 +84,7 @@ void ldn_keys_erase(void)
     nvs_erase_all(h);
     nvs_commit(h);
     nvs_close(h);
+    memset(s_cache, 0, sizeof(s_cache));   /* VC-Adapter merge */
 }
 
 static const uint8_t kAdvertiseSeed[16] = {

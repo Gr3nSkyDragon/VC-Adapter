@@ -7,11 +7,14 @@
  * board's state where it is (after a failed trade, say). It opens the port the way the other tools do (esp32-serial.c: DTR on, RTS
  * off), which leaves the board running; a serial monitor that toggles RTS on open resets it, and the state with it.
  *
- *   ldn-console [COMx] [command ...]
+ *   ldn-console [COMx] [--watch] [command ...]
  *
  * With no port, the first Espressif board found. With no commands, the adapter's state: LDN_PICO_DATA, LDN_PICO_STATS,
  * LDN_PICO_STATUS, LDN_CABLE_LOG (Ruby and Sapphire's cable; an error line on firmware without it) and LDN_SHIM_LOG. Only text
  * commands go out: no 3DS frame, so the board stays in its Switch mode.
+ *
+ * --watch: sends only the commands given (none by default) and then keeps printing what the board says until Ctrl+C. The bridge
+ * reports a session's steps as they happen (LDN_BRIDGE ...); a board nobody is reading drops them, so start this before the try.
  */
 #include "esp32-serial.h"
 
@@ -58,8 +61,18 @@ int main(int argc, char** argv) {
 	fprintf(stderr, "%s open\n", name);
 	_drain(port, 300); // whatever the board had queued for a host
 
-	const char* const* commands = argc > first ? (const char* const*) (argv + first) : kDefault;
-	int count = argc > first ? argc - first : (int) (sizeof(kDefault) / sizeof(kDefault[0]));
+	bool watch = false;
+	const char* given[32];
+	int givenCount = 0;
+	for (int i = first; i < argc; ++i) {
+		if (!strcmp(argv[i], "--watch")) {
+			watch = true;
+		} else if (givenCount < (int) (sizeof(given) / sizeof(given[0]))) {
+			given[givenCount++] = argv[i];
+		}
+	}
+	const char* const* commands = givenCount || watch ? given : kDefault;
+	int count = givenCount || watch ? givenCount : (int) (sizeof(kDefault) / sizeof(kDefault[0]));
 	for (int i = 0; i < count; ++i) {
 		char line[128];
 		int length = snprintf(line, sizeof(line), "\n%s\n", commands[i]);
@@ -68,6 +81,10 @@ int main(int argc, char** argv) {
 			break;
 		}
 		_drain(port, 600);
+	}
+	if (watch) {
+		fprintf(stderr, "Watching %s: Ctrl+C to stop\n", name);
+		_drain(port, INFINITE);
 	}
 	Esp32SerialClose(port);
 	return 0;

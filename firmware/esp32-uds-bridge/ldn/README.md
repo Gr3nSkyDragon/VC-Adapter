@@ -32,6 +32,11 @@ Kept as close to upstream as possible, so that a newer upstream can be copied ov
   the GBA's link manager sees as a lost partner), and starts its room search again a second later. Hosting's radio is
   stopped before the session's, so the room search gets its station back. Without the option it restarts the board as
   upstream does.
+- `ldn_keys.c`: the keys are read from flash once and kept in RAM (`ldn_keys_store` and `ldn_keys_erase` keep that copy in
+  step). With the adapter on the second core, interrupts masked, every flash read on the first waits for that core to let
+  them in, and each key derivation (three reads) took about 200 ms. A room the GBA leads then answered a Switch's
+  authentication 400 to 800 ms late, after the Switch, which asks every 200 ms and gives up after five, had left
+  ("The other trainer appears unavailable"). Both builds have the change.
 
 Everything else, `components/zstd` included, is unchanged. The files are built as their own component,
 `../components/ldn_bridge`, whose linker fragment puts all their static data in one block; when the board boots in 3DS mode

@@ -319,6 +319,11 @@ through the Switch side; the board went 3DS -> Switch -> 3DS -> Switch on one po
 breadboard: BOB-12009 shifter, GBA link plug), retail Red traded with VC Blue through the link port, with the relay and on its
 own. Not yet tried: a Gen 2 cartridge through the link port, a battery-powered board, and the VC-Adapter PCB itself.
 
+Firmware 2.0 on hardware (2026-10-25, the same breadboard, USB powered): FireRed, LeafGreen and Emerald traded with a Switch
+through the emulated Wireless Adapter, with the Switch leading the group and with the GBA leading it (the board hosting the
+room); Ruby traded through its cable, repeated trade room visits in one run included; a cartridge swapped on a powered board
+was found afresh; a Gen 1 cartridge traded with Virtual Console on the 3DS side.
+
 Things to look at first if something misbehaves:
 
 1. **Peer retransmissions.** Without hardware ACKs the peer resends frames it thinks were lost; a

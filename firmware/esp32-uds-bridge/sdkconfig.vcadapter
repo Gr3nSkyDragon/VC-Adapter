@@ -9,3 +9,12 @@ CONFIG_UDS_LINK_PORT=y
 CONFIG_UDS_SWITCH_LDN=y
 # CONFIG_ESP_INT_WDT_CHECK_CPU1 is not set
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+# The XIAO ESP32-S3's 8 MB of octal PSRAM (an ESP32-S3R8), for the Wi-Fi and network stacks' buffers: the emulated adapter keeps
+# ~29 KB of internal RAM the GB-Link profile has free, and hosting a room for the Switch (the GBA leading) ran the free heap down
+# to ~11 KB. With this the lowest seen is 8 MB. The adapter's link code and data stay in internal RAM. A board without PSRAM
+# still boots (as before).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

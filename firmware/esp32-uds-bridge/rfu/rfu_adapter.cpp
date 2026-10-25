@@ -563,8 +563,11 @@ static uint32_t s_probeNotBeforeMs;
 static void GLUE_IRAM sdReset(uint32_t now)
 {
 #if CONFIG_UDS_RFU_CABLE
-    // A game resetting the adapter is about to clock its ID exchange: no cable handshake on SC meanwhile.
-    s_probeNotBeforeMs = now + 5000;
+    // A game resetting the adapter is about to clock its ID exchange: no cable handshake on SC meanwhile. It clocks within
+    // milliseconds (librfu's soft reset goes straight into AgbRFU_checkID), and its first word ends the probing for good, so a
+    // short hold does. It was 5 s, and Ruby and Sapphire pulse SD too as they open their cable link: a hardware test found
+    // the game on the first probe after the hold, up to five seconds after it was ready.
+    s_probeNotBeforeMs = now + 250;
 #endif
     snapshot(1);
     g_core.onSdReset(now);
@@ -775,6 +778,7 @@ static constexpr uint32_t kProbeEveryMs = 250;
 static constexpr uint32_t kConsoleOffMs = 500;
 
 static uint32_t s_sessionStartMs, s_lastProbeMs;
+static uint32_t s_consoleOffSinceMs;  // the adapter's side: every line low since (0: not now)
 static cable_master s_master;
 
 static inline void IRAM_ATTR waitUntil(uint32_t cc)
@@ -904,15 +908,82 @@ static void cableNote(void*, const char* text) { cableLog(text); }
 // While the game is unknown and the port quiet: the master's handshake, which a Ruby or Sapphire in its cable club answers.
 // The GBA's SC is an input then (a wireless game drives it only for the adapter, after its soft reset), and SD is driven only
 // low, for a few bits.
-static bool GLUE_IRAM probeCable()
+// A log line put together from text and numbers, without printf.
+struct CableLine
+{
+    char text[kCableLogChars];
+    unsigned at = 0;
+    CableLine& operator<<(const char* s)
+    {
+        while (*s && at + 1 < sizeof(text)) text[at++] = *s++;
+        text[at] = '\0';
+        return *this;
+    }
+    CableLine& operator<<(uint32_t n)
+    {
+        char digits[10];
+        unsigned count = 0;
+        do
+        {
+            digits[count++] = static_cast<char>('0' + n % 10);
+            n /= 10;
+        } while (n && count < sizeof(digits));
+        while (count && at + 1 < sizeof(text)) text[at++] = digits[--count];
+        text[at] = '\0';
+        return *this;
+    }
+    CableLine& hex(uint16_t v)
+    {
+        for (int shift = 12; shift >= 0 && at + 1 < sizeof(text); shift -= 4) text[at++] = "0123456789ABCDEF"[(v >> shift) & 0xF];
+        text[at] = '\0';
+        return *this;
+    }
+};
+
+// This spell of probing (the game unknown, the port quiet): when it began and how many probes it took, for the log. A hardware
+// test felt slow to find a Ruby; these say how long it was and why.
+static uint32_t s_probeSpellStartMs;  // 0: no probe yet since the game became unknown
+static uint32_t s_probesThisSpell;
+static uint32_t s_probeOtherAnswers;  // answered, but not with the cable handshake
+
+static void probeSpellReset()
+{
+    s_probeSpellStartMs = 0;
+    s_probesThisSpell = 0;
+    s_probeOtherAnswers = 0;
+}
+
+// True: the game answered with the cable handshake.
+static bool GLUE_IRAM probeCable(uint32_t now)
 {
     if ((rd() & (s_scM | s_sdM)) != (s_scM | s_sdM)) return false;  // something holds SC or SD low: the console is off
+    if (!s_probeSpellStartMs)
+    {
+        s_probeSpellStartMs = now ? now : 1;
+        cableLog("cable: the game is unknown and the port quiet: trying the cable handshake every 250 ms");
+    }
     cablePins(true);
     uint16_t reply;
     const bool answered = cableExchange(CABLE_MASTER_HANDSHAKE, &reply);
     cablePins(false);
     s_cableProbes = s_cableProbes + 1;
-    return answered && (reply & ~3) == CABLE_SLAVE_HANDSHAKE;
+    ++s_probesThisSpell;
+    const bool hit = answered && (reply & ~3) == CABLE_SLAVE_HANDSHAKE;
+    if (answered && !hit && ++s_probeOtherAnswers <= 3)
+    {
+        CableLine line;
+        line << "cable: probe " << s_probesThisSpell << " answered ";
+        line.hex(reply) << ", not the handshake";
+        cableLog(line.text);
+    }
+    if (hit)
+    {
+        CableLine line;
+        line << "cable: probe " << s_probesThisSpell << " answered, " << (now - s_probeSpellStartMs) << " ms after the first ("
+             << s_probeOtherAnswers << " other answers)";
+        cableLog(line.text);
+    }
+    return hit;
 }
 
 // The cable link, until the console goes off or the bridge stops the adapter. One packet per GBA frame: the checksum, then the
@@ -1004,6 +1075,8 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
     s_holdSi = s_txM;
     s_sessionStartMs = nowMs();
     s_lastProbeMs = 0;
+    s_consoleOffSinceMs = 0;
+    probeSpellReset();
     s_probeNotBeforeMs = 0;
 #endif
 
@@ -1059,11 +1132,32 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
             work(now, kWorkBytes);
             breathe(now);
 #if CONFIG_UDS_RFU_CABLE
+            // The console off (every line low through the level shifter) ends the game: whatever comes next, another
+            // cartridge included, is found afresh, as at power-up. Without this a board left on (USB, or the chip enable's USB
+            // path) kept an earlier wireless game's mark, and a Ruby or Sapphire put in after it was never probed.
+            if (!(rd() & (s_scM | s_rxM | s_sdM)))
+            {
+                if (!s_consoleOffSinceMs)
+                    s_consoleOffSinceMs = now ? now : 1;
+                else if (now - s_consoleOffSinceMs >= kConsoleOffMs && (s_game != kGameUnknown || g_core.dbgAnyRx))
+                {
+                    cableLog("console off: the next game is found afresh");
+                    resetCore();
+                    tx(true);
+                    releaseSc();
+                    s_game = kGameUnknown;
+                    s_holdSi = s_txM;
+                    s_sessionStartMs = nowMs();
+                    probeSpellReset();
+                }
+            }
+            else
+                s_consoleOffSinceMs = 0;
             if (s_game == kGameUnknown && !g_core.dbgAnyRx && now - s_sessionStartMs >= kProbeAfterMs &&
                 now - s_lastProbeMs >= kProbeEveryMs && static_cast<int32_t>(now - s_probeNotBeforeMs) >= 0)
             {
                 s_lastProbeMs = now;
-                if (probeCable())
+                if (probeCable(now))
                 {
                     s_game = kGameCable;
                     cableSession(gen);
@@ -1074,6 +1168,8 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
                     s_game = kGameUnknown;
                     s_holdSi = s_txM;
                     s_sessionStartMs = nowMs();
+                    s_consoleOffSinceMs = 0;
+                    probeSpellReset();
                 }
             }
 #endif

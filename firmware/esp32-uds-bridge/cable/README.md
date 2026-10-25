@@ -7,14 +7,14 @@ translating between the two link protocols (`CONFIG_UDS_RFU_CABLE`). Client side
 
 | File | What |
 | --- | --- |
-| `rfu-wrapper-air.c` | The wrapper's wireless side and translator, copied **unchanged** from mGBA's `src/gba/sio/rfu-wrapper-air.c` (mgba_LDN, commit `bb0125780`). |
+| `rfu-wrapper-air.c` | The wrapper's wireless side and translator, mGBA's `src/gba/sio/rfu-wrapper-air.c` (mgba_LDN, commit `bb0125780`) with one fix made the same way in mGBA: leaving the trade room also forgets the old leader's LinkPlayer (`_exitClosePassed`), which on a second visit in one run had gone to the game as the new leader's. |
 | `compat/` | Stand-ins for the mGBA headers it includes, so it builds unchanged: the adapter event queue, the backend interface, the wrapper's peer, the cable trace. `rfu-wrapper-air.h` is mGBA's own. |
 | `cable_air.c`, `.h` | The board's half of the wireless side: the event queue, and a backend that is the client half of mGBA's ESP32 backend (`rfu-esp32.c`), talking RFU1 frames to the bridge on this chip instead of over USB. |
 | `cable_master.c`, `.h` | The cable's master, mGBA's `rfu-wrapper.c` driver logic without the emulator: the handshake, the checksum and the eight words of each packet. |
 | `test/` | PC tests: `cable_air_test.c` (the wireless side against a fake bridge) and `cable_master_test.c` (the master and the wireless side against a fake Ruby, to the join request). |
 
 The wire itself is in `../rfu/rfu_adapter.cpp` (`cableExchange`, `probeCable`, `cableSession`), next to the adapter it shares
-the link port and the second core with. A fix made in mGBA's file can be copied over as it is.
+the link port and the second core with. A fix made in mGBA's file can be copied over as it is, and the other way round.
 
 Memory: the wireless side's state (about 8 KB, mGBA's `struct Air`) lives in the adapter core's memory, which is idle while the
 cable runs; the event queue (8 entries here, against mGBA's 64) and the cable's log are static.
@@ -45,15 +45,18 @@ So, from the moment the adapter goes on the wire:
 
 1. The game is unknown, and SI is held high (the adapter mirrors SO onto SI only once the GBA clocks it: the ID exchange has
    no handshake, `librfu_sio32id.c`).
-2. The first adapter word marks a wireless game (once the ID exchange is through, for the rest of the session).
-3. While it is unknown, after 10 s and at most every 250 ms, with the port quiet and SC and SD high, and not within 5 s of
-   an SD reset: one cable handshake transfer. A `0xB9A0` answer hands the port to the cable until the console goes off
-   (every line low for 0.5 s) or the bridge stops the adapter; then the adapter is back, the game unknown again.
+2. The first adapter word marks a wireless game (once the ID exchange is through, until the console goes off).
+3. While it is unknown, after 10 s and at most every 250 ms, with the port quiet and SC and SD high, and not within 250 ms
+   of an SD pulse (a wireless game's soft reset, but Ruby and Sapphire pulse SD too as they open their link): one cable
+   handshake transfer. A `0xB9A0` answer hands the port to the cable until the console goes off
+   or the bridge stops the adapter; then the adapter is back, the game unknown again.
+4. The console going off (every line low for 0.5 s, on either side) makes the game unknown again, with a fresh adapter, so
+   a board that stays powered (USB) finds a swapped cartridge as at power-up.
 
-`LDN_CABLE_LOG` (in `ldn-console`'s defaults) prints which of the three it is, the cable's state and its last 16 log lines.
+`LDN_CABLE_LOG` (in `ldn-console`'s defaults) prints which of the three it is, the cable's state and its last 16 log lines,
+among them when a spell of probing began and which probe the game answered, how many milliseconds after the first.
 
 ## Not done yet
 
-- A Ruby or Sapphire that leaves its cable club stays on the cable side (handshaking) until the console goes off; a cartridge
-  swapped while the board stays powered (USB) is found again only after that.
+- A Ruby or Sapphire that leaves its cable club stays on the cable side (handshaking) until the console goes off.
 - No host side (RS leading a group), as in mGBA.
