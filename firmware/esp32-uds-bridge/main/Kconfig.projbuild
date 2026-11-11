@@ -9,16 +9,83 @@ config UDS_SWITCH_LDN
         turns it off until that board has a GBA side of its own (its link port pins are the Pico UART's defaults). Ignored with
         ESP-IDF 5.x, which cannot build it.
 
+config UDS_FIRMWARE_MAJOR
+    int
+    default 2
+
 config UDS_FIRMWARE_MINOR
     int
-    default 9 if UDS_LINK_PORT
-    default 8
+    default 0
     help
-        The firmware's version is 1.<this>, by profile: 1.8 the GB-Link build (3DS side + Switch side), 1.9 the VC-Adapter board
-        build (link port; beta, Game Boy side only).
+        The firmware's version, <major>.<minor>, which HELLO_ACK reports. Both lines are 2.0 (the uds line was 1.8, the aio line
+        1.9); HELLO_ACK's link-port feature bit tells them apart, as it did between 1.8 and 1.9.
+
+config UDS_FIRMWARE_LINE
+    string
+    default "aio" if UDS_LINK_PORT
+    default "uds"
+    help
+        Which firmware this is, in its name and app version (2.0-uds, 2.0-aio): "uds", the bridge for a board on a PC's or phone's
+        USB (mGBA, Azahar, PokeUDS; 3DS side + Switch side), or "aio", the standalone VC-Adapter board for the GB/GBA games (link
+        port; beta, Game Boy side only).
+
+menu "Memory (per chip)"
+
+config UDS_WIFI_STATIC_RX_BUFFERS
+    int "3DS side: Wi-Fi static receive buffers"
+    range 2 32
+    default 4 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
+    default 16
+    help
+        The 3DS side starts Wi-Fi with its own buffer counts (radio.c, init_wifi_once). 16/64/64 is what the S3 has always used; the
+        classic ESP32 and the C3 get GB-Link Switch LDN's 4/16/16 for those chips, which has never been measured with a 3DS.
+
+config UDS_WIFI_DYNAMIC_RX_BUFFERS
+    int "3DS side: Wi-Fi dynamic receive buffers"
+    range 4 128
+    default 16 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
+    default 64
+
+config UDS_WIFI_DYNAMIC_TX_BUFFERS
+    int "3DS side: Wi-Fi dynamic transmit buffers"
+    range 4 128
+    default 16 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
+    default 64
+
+config UDS_EVENT_RING_BYTES
+    int "3DS side: ring for received frames on their way to the host, in bytes"
+    range 8192 131072
+    default 16384 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
+    default 49152
+
+config UDS_HOST_RX_BUFFER
+    int "3DS side: host link receive buffer, in bytes"
+    range 1024 65536
+    default 4096 if IDF_TARGET_ESP32
+    default 8192 if IDF_TARGET_ESP32C3
+    default 16384
+
+config UDS_HOST_TX_BUFFER
+    int "3DS side: host link send buffer, in bytes"
+    range 1024 65536
+    default 8192 if IDF_TARGET_ESP32
+    default 4096 if IDF_TARGET_ESP32C3
+    default 16384
+
+endmenu
+
+config UDS_BOARD_XIAO_C6_RF_SWITCH
+    bool "Seeed XIAO ESP32-C6: turn its RF switch on (GPIO3 low) and pick the onboard antenna (GPIO14 low)"
+    depends on IDF_TARGET_ESP32C6
+    default y
+    help
+        The XIAO ESP32-C6's antenna switch is off until GPIO3 is driven low, and GPIO14 picks the antenna (low: onboard, high: U.FL).
+        With both floating the radio only reaches strong nearby signals. Done before Wi-Fi starts, in both modes, as GB-Link Switch
+        LDN's firmware/ESP32-C6 does. Turn it off on a C6 board that uses these pins for something else.
 
 config UDS_LINK_PORT
     bool "Game Boy link port wired to GPIOs (no GB-Link)"
+    depends on IDF_TARGET_ESP32S3
     default n
     help
         A GBA/GBC/Game Boy link port wired to this board through a level shifter, with no GB-Link: the board clocks the cartridge
@@ -26,7 +93,8 @@ config UDS_LINK_PORT
         own; a host's HELLO takes the board back, and mGBA's uds-gblink-relay --port starts it with the log on the PC. The defaults
         are the shared VC-Adapter / GB-Link pinout on a Seeed XIAO ESP32-S3: SC on D0, SI on D1, SO on D2, SD on D3. SI and SO are
         named from this board's side, as on the GB-Link: this board's SI takes the console's SO, its SO feeds the console's SI. See
-        the README's "GBA link port".
+        the README's "GBA link port". ESP32-S3 only: the VC-Adapter board is S3 hardware, and these pins clash on the other chips
+        (UART0 on the classic ESP32's GPIO1 and GPIO3, the XIAO C6's RF switch on GPIO3).
 
 config UDS_LINK_PORT_SC_GPIO
     int "GPIO for SC, the clock (port pin 5)"

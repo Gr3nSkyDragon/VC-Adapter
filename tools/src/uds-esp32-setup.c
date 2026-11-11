@@ -10,10 +10,11 @@
  * Each step can be done on its own. Flashing writes the whole image, which erases the key store, so the keys are stored after the
  * flash; a board is never assumed to have them already.
  *
- * The firmware comes in two builds (package-release-bin.ps1): firmware 1.8, the GB-Link build (3DS and Switch sides), for a board
- * on the PC's USB with a GB-Link, and firmware 1.9, the VC-Adapter board build (beta, Game Boy side only), for a board wired to the
- * console's link port. The "Build for" choice picks the newest image of that build next to this program; an image's build is read
- * from its version (1.9-vcadapter), and an image from before the split counts as the GB-Link build.
+ * The firmware comes in two lines (package-release-bin.ps1): 2.0-uds (was 1.8, the GB-Link build: 3DS and Switch sides), for a
+ * board on the PC's USB, and 2.0-aio (was 1.9, the VC-Adapter board build: beta, Game Boy side only), for a board wired to the
+ * console's link port. The "Build for" choice picks the newest image of that line next to this program; an image's line is read
+ * from its version (2.0-aio, 1.9-vcadapter), and an image from before the split counts as the GB-Link build. This tool flashes
+ * ESP32-S3 boards only; the 2.0-uds images for the classic ESP32, C3 and C6 (alpha) need esptool or PokeUDS.
  *
  * Windows only (Win32, no other dependencies). Build target: uds-esp32-setup.
  */
@@ -101,13 +102,13 @@ static const char* _buildName(enum Build build) {
 	return build == BUILD_VCADAPTER ? "VC-Adapter board build" : build == BUILD_GBLINK ? "GB-Link build" : "build not marked";
 }
 
-// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "1.9-vcadapter"). Unmarked: from before the
-// split, or built by hand with idf.py.
+// An image's build, from the version package-release-bin.ps1 gives it ("2.0-uds", "2.0-aio"; before 2.0 "1.8-gblink",
+// "1.9-vcadapter"). Unmarked: from before the split, or built by hand with idf.py.
 static enum Build _imageBuild(const struct UDSFlashImageInfo* info) {
-	if (strstr(info->version, "-vcadapter")) {
+	if (strstr(info->version, "-aio") || strstr(info->version, "-vcadapter")) {
 		return BUILD_VCADAPTER;
 	}
-	if (strstr(info->version, "-gblink")) {
+	if (strstr(info->version, "-uds") || strstr(info->version, "-gblink")) {
 		return BUILD_GBLINK;
 	}
 	return BUILD_UNKNOWN;
@@ -481,7 +482,7 @@ static void _start(void) {
 	if (current < 0 || (size_t) current >= sPortCount) {
 		problem = "No board is selected. Plug the board in by its native USB port and press Refresh.";
 	} else if (job->flash && !job->firmware[0]) {
-		problem = "Choose the firmware file (esp32-uds-bridge-fw<version>-esp32s3-<build>.bin).";
+		problem = "Choose the firmware file (esp32-uds-bridge-2.0-<uds or aio>-esp32s3.bin).";
 	} else if (job->key && !job->keys[0]) {
 		problem = "Choose your aes_keys.txt.";
 	} else if (job->switchKeys && !job->prodKeys[0]) {
@@ -528,11 +529,13 @@ static HWND _control(const char* cls, const char* text, DWORD style, int id, int
 	return hwnd;
 }
 
-// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them. Images from before
-// the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are GB-Link builds.
+// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them: 2.0 on
+// (esp32-uds-bridge-2.0-uds-esp32s3.bin), then the older names. Images from before the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are
+// GB-Link builds.
 static void _defaultFirmware(enum Build build, char* out, size_t capacity) {
-	static const char* const kGbLink[] = {"esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw*-esp32s3.bin"};
-	static const char* const kVcAdapter[] = {"esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
+	static const char* const kGbLink[] = {"esp32-uds-bridge-*-uds-esp32s3.bin", "esp32-uds-bridge-fw*-esp32s3-gblink.bin",
+	                                      "esp32-uds-bridge-fw*-esp32s3.bin"};
+	static const char* const kVcAdapter[] = {"esp32-uds-bridge-*-aio-esp32s3.bin", "esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
 	const char* const* patterns = build == BUILD_VCADAPTER ? kVcAdapter : kGbLink;
 	size_t count = build == BUILD_VCADAPTER ? sizeof(kVcAdapter) / sizeof(kVcAdapter[0]) : sizeof(kGbLink) / sizeof(kGbLink[0]);
 	char dir[MAX_PATH];
@@ -625,8 +628,8 @@ static void _create(void) {
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_FW_BROWSE, 488, 33, 100, 26);
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
 	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
-	_control("BUTTON", "GB-Link + Switch (firmware 1.8)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
-	_control("BUTTON", "VC-Adapter board, beta (1.9)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
+	_control("BUTTON", "GB-Link + Switch (2.0-uds)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
+	_control("BUTTON", "VC-Adapter board, beta (2.0-aio)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
 	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 142, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 141, 100, 26);

@@ -4,7 +4,7 @@
 breadboard (see below); the board layout is a work in progress.
 
 A KiCad 10 project for the VC-Adapter: a Seeed XIAO ESP32-S3 plugged straight into a GBA, GBC or Game Boy's link port, with no
-GB-Link (Pico) and no PC. It runs firmware **1.9 (beta)**, the VC-Adapter board build of `../firmware/esp32-uds-bridge`, which
+GB-Link (Pico) and no PC. It runs firmware **2.0-aio (beta**, was 1.9), the standalone board line of `../firmware/esp32-uds-bridge`, which
 clocks the cartridge itself and trades with a 3DS's Virtual Console Pokemon games over the 3DS's local wireless. The Game Boy
 side only for now: Gen 3 (GBA) games need the board's own GBA side, which is still to come.
 
@@ -20,7 +20,7 @@ side only for now: Gen 3 (GBA) games need the board's own GBA side, which is sti
 
 The link port's signals are 5 V when a GBA runs a Game Boy cartridge (3.3 V for a GBA game) and the ESP32's pins take 3.3 V, so
 the shifter's high side runs from the port's own VCC (pin 1) and follows the console; its low side runs from the XIAO's 3V3. No
-resistors are needed for the link signals. The pinout is the one the firmware expects (`sdkconfig.vcadapter`, the shared VC-Adapter / GB-Link
+resistors are needed for the link signals. The pinout is the one the firmware expects (`sdkconfig.aio`, the shared VC-Adapter / GB-Link
 pinout); SI and SO are the adapter's, as in the GB-Link's notation:
 
 | Plug pin (console's signal) | Shifter | XIAO ESP32-S3 |

@@ -1,19 +1,17 @@
-CONFIG_IDF_TARGET="esp32s3"
+# Shared by every chip. ESP-IDF reads sdkconfig.defaults.<chip> after this file: the CPU clock, the console, the GB-Link Pico's
+# UART pins and the memory each chip can spare are set there. The target itself comes from IDF_TARGET (CMakeLists.txt).
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
-# The console is the native USB port, as GB-Link Switch LDN's text console needs. Nothing is logged, so in 3DS mode the
-# port carries only the binary protocol.
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# Nothing is logged, so in 3DS mode the host port carries only the binary protocol.
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 # Messages up to INFO are compiled in, but the default level stays NONE: only the 3DS side raises it, and sends the log to the host
 # as LOG frames (main/diag.c). GB-Link Switch LDN's mode keeps its console free of them.
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
-# Wi-Fi buffers: ESP-IDF's defaults, as GB-Link Switch LDN's side is built with. The 3DS side asks for more, and no
-# aggregation, when it starts Wi-Fi (radio.c, init_wifi_once).
+# Wi-Fi buffers: ESP-IDF's defaults on the S3 and the C6, as GB-Link Switch LDN's side is built with there (the classic ESP32 and the
+# C3 trim them in their own files, as upstream does). The 3DS side asks for its own numbers, and no aggregation, when it starts Wi-Fi
+# (radio.c, init_wifi_once; main/Kconfig.projbuild's UDS_WIFI_*, whose defaults are per chip).
 # A 3 MB app slot for both sides (partitions.csv); NVS stays at 0x9000.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

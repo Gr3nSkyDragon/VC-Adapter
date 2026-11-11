@@ -1,16 +1,17 @@
 # ESP-IDF 6 split the old `driver` component into one component per peripheral; 5.2 still has `driver`. Releases build with 6.1,
 # which GB-Link Switch LDN pins; 5.2.8 still builds the 3DS side alone.
+# The host link (USB Serial/JTAG, or UART0 on the classic ESP32) is ldn/transport.h, in components/ldn_bridge, with every ESP-IDF.
 if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
-    set(driver_requires esp_driver_usb_serial_jtag esp_driver_gpio esp_driver_uart esp_driver_i2c)
+    set(driver_requires esp_driver_gpio esp_driver_uart esp_driver_i2c)
     # The Switch side: GB-Link Switch LDN's bridge (components/ldn_bridge, the sources in ../ldn). ESP-IDF 6.1 only.
     set(ldn_requires ldn_bridge esp_hw_support heap)
 else()
     set(driver_requires driver)
-    set(ldn_requires)
+    set(ldn_requires ldn_bridge)
 endif()
 
 idf_component_register(
-    SRCS "main.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "gbwrap.c" "display.c" "scene.c" "screen.c"
+    SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "gbwrap.c" "display.c" "scene.c" "screen.c"
          "linkport.c"
          # The Game Boy wrapper, copied unchanged from mGBA (mgba_LDN, src/gb/sio): see gbwrap/README.md.
          "gbwrap/uds-wire.c" "gbwrap/uds-cable.c" "gbwrap/uds-session.c" "gbwrap/uds-pia.c" "gbwrap/uds-room.c"

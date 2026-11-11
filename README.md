@@ -2,19 +2,20 @@
 
 Firmware, PC tools and a PCB for an ESP32-S3 board that carries Nintendo 3DS local wireless (UDS) for Azahar and mGBA-LDN, and
 lets a real Game Boy cartridge trade with a 3DS's Virtual Console Pokemon games (Red, Blue, Yellow, Gold, Silver, Crystal).
-Firmware 1.8 also carries GB-Link Switch LDN's bridge, for GBA games with a Switch.
+Firmware 2.0-uds also carries GB-Link Switch LDN's bridge, for GBA games with a Switch.
 
 ## Firmware versions
 
-One codebase, two builds (`firmware/esp32-uds-bridge`, `package-release-bin.ps1 -Profile 1` or `-Profile 2`):
+One codebase, two firmware lines (`firmware/esp32-uds-bridge`, `package-release-bin.ps1 -Line uds` or `-Line aio`;
+`firmware/esp32-uds-bridge/FIRMWARE.md` has the chips and what is alpha):
 
-| | Firmware 1.8 (profile 1, `gblink`) | Firmware 1.9 **beta** (profile 2, `vcadapter`) |
+| | Firmware 2.0-uds (was 1.8, `gblink`) | Firmware 2.0-aio **beta** (was 1.9, `vcadapter`) |
 | --- | --- | --- |
-| Board | Any ESP32-S3 on a PC's or phone's USB | The VC-Adapter board: a XIAO ESP32-S3 on the console's link port (`VC-Adapter-DIY`) |
+| Board | Any ESP32-S3 on a PC's or phone's USB: the bridge for mGBA, Azahar and PokeUDS. **Alpha** (built, not yet run on hardware): the classic ESP32, ESP32-C3 and ESP32-C6 | The standalone VC-Adapter board for the GB/GBA games: a XIAO ESP32-S3 on the console's link port (`VC-Adapter-DIY`) |
 | 3DS side | Raw radio for Azahar; Virtual Console trades for mGBA, or a real cartridge through a GB-Link and `uds-gblink-relay` | Virtual Console trades for the cartridge on the board's own link port, with no PC (or with `uds-gblink-relay --port` watching) |
 | Switch side | GB-Link Switch LDN's bridge, for mGBA's Switch backend, GB-Link's clients or a GB-Link | Not yet: **Game Boy games only** until the board has a GBA side of its own |
 | Switching | By what the host speaks, both ways, no power cycle | 3DS side only |
-| Image | `esp32-uds-bridge-fw1.8-esp32s3-gblink.bin` | `esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin` |
+| Image | `esp32-uds-bridge-2.0-uds-<chip>.bin` (`esp32s3`, `esp32`, `esp32c3`, `esp32c6`) | `esp32-uds-bridge-2.0-aio-esp32s3.bin` |
 
 Release images and `uds-esp32-setup.exe` (which flashes an image and stores the keys the board needs) are on the Releases page.
 See `firmware/esp32-uds-bridge/README.md` for the hardware, flashing, the protocol and what has been verified.
@@ -27,14 +28,15 @@ See `firmware/esp32-uds-bridge/README.md` for the hardware, flashing, the protoc
 
 ## Building
 
-**Firmware:** ESP-IDF v6.1 at commit `fff9895c82d744c7237be8847347bdd1b07c6643` (GB-Link Switch LDN pins it). In PowerShell:
+**Firmware:** ESP-IDF v6.1 at commit `fff9895c82d744c7237be8847347bdd1b07c6643` (GB-Link Switch LDN pins it), installed for
+`esp32,esp32c3,esp32c6,esp32s3`. In PowerShell (`package-release-bin.sh` on Linux, macOS and WSL):
 
 ```
 . <ESP-IDF v6.1>\export.ps1
 cd firmware/esp32-uds-bridge
-.\package-release-bin.ps1               # both images into release/
-.\package-release-bin.ps1 -Profile 1    # firmware 1.8 only
-.\package-release-bin.ps1 -Profile 2    # firmware 1.9 only
+.\package-release-bin.ps1                 # every image into release/
+.\package-release-bin.ps1 -Line uds       # 2.0-uds for the four chips
+.\package-release-bin.ps1 -Line aio       # 2.0-aio (ESP32-S3)
 ```
 
 **PC tools:** from a Visual Studio x64 developer prompt:
@@ -55,8 +57,9 @@ shares golden vectors with Azahar's `src/tests/core/hle/service/nwm/esp32_wire.c
 ## Licences
 
 Firmware and PC tools: GPL-3.0-or-later (`LICENSE`). GB-Link Switch LDN's bridge (`firmware/esp32-uds-bridge/ldn`) is
-AGPL-3.0, its LDN protocol components GPL-3.0 (their own `LICENSE` and `LDN-GPL-3.0.txt`); firmware 1.8 contains it, so a 1.8
-image as a whole is distributed under AGPL-3.0. Firmware 1.9 leaves it out. PCB: MIT (`VC-Adapter-DIY/LICENSE`);
+AGPL-3.0, its LDN protocol components GPL-3.0 (their own `LICENSE` and `LDN-GPL-3.0.txt`); firmware 2.0-uds (and 1.8) contains
+it, so such an image as a whole is distributed under AGPL-3.0. Firmware 2.0-aio (and 1.9) leaves it out. `firmware/esp32-uds-bridge/main/board.c`
+is ported from GB-Link Switch LDN and is AGPL-3.0 too. PCB: MIT (`VC-Adapter-DIY/LICENSE`);
 `VC-Adapter-DIY/gba_linkport` is MIT from GB-Link-USB-DIY (its own `LICENSE`). Three files stay MPL-2.0, as their headers say:
 `tools/src/md5.c` and `md5.h` (mGBA's, by Jeffrey Pfau) and `tools/src/esp32-serial.c` (mGBA-LDN, with changes by Alex Howe).
 The firmware's `main/gbwrap/include/mgba-util` stand-ins describe mGBA's interfaces.

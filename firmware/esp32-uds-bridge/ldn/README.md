@@ -19,9 +19,17 @@ Kept as close to upstream as possible, so that a newer upstream can be copied ov
   no-op here; `main/bridge_mode.c` provides the real one), which notices a 3DS host's HELLO and restarts the board in 3DS mode.
   No frame of this firmware's own can be mistaken for one. (It used to stop at binary mode, so a board whose Switch host had
   set the wire up and then closed the port stayed in Switch LDN mode until it was power cycled.)
+- `transport.h`, `transport_usb_serial_jtag.c`, `transport_uart.c` (2.0): the merged firmware's 3DS side uses the same host link,
+  so that it runs on the classic ESP32's UART too. Three calls are added for it (`bridge_transport_open` with its own buffer
+  sizes and no stdio hook, `bridge_transport_read_wait`, `bridge_transport_write_wait`); the UART's driver install takes its
+  ring sizes as an argument; and the `_vfs` headers are included only where they exist (ESP-IDF 5.x builds).
+- `ldn_keys.c` (2.0): `ldn_decode_advertisement`'s `material` buffer was 1312 bytes, 40 short of the 72 + 1280 copied into it
+  and hashed (a stack overrun in the 1280-byte advertisement branch; RISC-V GCC at `-O2` reports it on the C3 and C6). It is
+  `72 + 1280` now. Still so upstream at `c972db4`.
 
 Everything else, `components/zstd` included, is unchanged. The files are built as their own component,
 `../components/ldn_bridge`, whose linker fragment puts all their static data in one block; when the board boots in 3DS mode
 that block is handed to the heap (`main/bridge_mode.c`), since this code does not run then. Like upstream, it needs ESP-IDF
-v6.1 at commit `fff9895c82d744c7237be8847347bdd1b07c6643` and checks the ESP32-S3 Wi-Fi driver library's hash
-(`../components/ldn_bridge/CMakeLists.txt`); a build with ESP-IDF 5.x leaves these files out and has the 3DS side only.
+v6.1 at commit `fff9895c82d744c7237be8847347bdd1b07c6643` and checks the chip's Wi-Fi driver library hash (upstream's, for
+the ESP32, C3, C6 and S3: `../components/ldn_bridge/CMakeLists.txt`); a build with ESP-IDF 5.x leaves these files out, but for
+the host link, and has the 3DS side only.
