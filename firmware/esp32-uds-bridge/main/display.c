@@ -1,6 +1,19 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version. */
 #include "display.h"
 
+#if CONFIG_IDF_TARGET_ESP32S2
+/* The Flipper board has no OLED or assigned display pins. */
+bool display_start(display_status_t status)
+{
+    (void)status;
+    return false;
+}
+
+void display_wake(void)
+{
+}
+#else
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -159,3 +172,5 @@ void display_wake(void)
 {
     ++s_wakes;
 }
+
+#endif

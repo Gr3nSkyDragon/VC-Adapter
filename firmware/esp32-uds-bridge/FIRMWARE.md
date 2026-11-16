@@ -21,7 +21,7 @@ esp32-uds-bridge-2.0-aio-esp32s3.bin    (beta)
 Each is merged (bootloader, partition table, app) and written at offset **`0x0`**, gaps included, so flashing erases the stored
 keys. Inside the classic ESP32's image the bootloader sits at `0x1000` (that chip's ROM looks for it there); on the other three it
 sits at `0x0`. `package-release-bin.ps1` (Windows) and `package-release-bin.sh` (Linux, macOS, WSL) build them all with ESP-IDF
-v6.1 installed for the four chips; `-Line uds|aio` and `-Chip <chip>` (or `./package-release-bin.sh <line> <chip>`) build one.
+v6.1 installed for the selected chips; `-Line uds|aio` and `-Chip <chip>` (or `./package-release-bin.sh <line> <chip>`) build one.
 
 ## What is alpha
 
@@ -116,3 +116,26 @@ The per-chip settings, the Wi-Fi driver hashes and the XIAO C6 board setup (`mai
 [GB-Link/gb-link-switch-ldn](https://github.com/GB-Link/gb-link-switch-ldn) at commit `c972db4` (AGPL-3.0), whose `firmware/`
 builds the same vendored `ldn/` for five chips. The `BBPLL_RECALIB` setting and the CP210x baud figures come from
 [Decryptu/pokeldn](https://github.com/Decryptu/pokeldn)'s `docs/hardware_esp32.md` (AGPL-3.0); no pokeldn code is copied here.
+
+## ESP32-S2 with native USB CDC
+
+The experimental Flipper Wi-Fi Developer Board build uses the `2.0-uds` release format.
+The USB OTG port runs TinyUSB CDC in slave mode to avoid the ESP32-S2 USB-105 erratum.
+This target starts directly in 3DS radio mode, with smaller Wi-Fi buffers and no on-board
+Game Boy wrapper or OLED profile. PokeUDS handles the game protocol on the computer.
+
+Build the merged release image with ESP-IDF 6.1 and its ESP32-S2 tools installed:
+
+```sh
+./package-release-bin.sh uds esp32s2
+```
+
+To enter download mode, hold BOOT, press and release RESET, then release BOOT. The merged
+`esp32-uds-bridge-2.0-uds-esp32s2.bin` writes at offset `0x0`; its bootloader is at
+`0x1000` inside the file.
+
+The standalone `2.0-uds` image was tested on a Flipper Wi-Fi Developer Board (ESP32-S2
+rev 0.0) with arm64 macOS. USB HELLO passed after a physical cable replug. Wi-Fi initialized,
+scanned channels 1, 6, and 11 for 20 seconds, and answered HELLO again afterward. The driver
+received 1,781 Wi-Fi frames with no USB drops or malformed USB frames. No 3DS hosts were
+heard. Retail 2DS/3DS discovery, encrypted communication, and trading remain untested.

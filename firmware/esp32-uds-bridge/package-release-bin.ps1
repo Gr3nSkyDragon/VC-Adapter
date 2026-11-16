@@ -4,14 +4,14 @@
 # Two firmware lines, from the same code (FIRMWARE.md):
 #   uds  firmware 2.0-uds (was 1.8, profile 1, "gblink"; sdkconfig.defaults): the bridge for a board on a PC's or phone's USB, for
 #        mGBA, Azahar and PokeUDS. The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks.
-#        Every chip: esp32s3, and esp32, esp32c3 and esp32c6 (alpha: built, not yet run on hardware).
+#        Every chip: esp32s3, and esp32, esp32s2, esp32c3 and esp32c6 (alpha: built, not yet run on hardware).
 #   aio  firmware 2.0-aio, beta (was 1.9, profile 2, "vcadapter"; sdkconfig.defaults + sdkconfig.aio): the standalone VC-Adapter board
 #        for the GB/GBA games, the console's link port on the GPIOs. Game Boy side only for now. esp32s3 only.
 # Each builds in its own folder (build-<line>-<chip>, with its own sdkconfig) and carries its version, line and chip in the file name
 # and in the app's version (2.0-uds, 2.0-aio), which uds-esp32-setup reads back.
 #
 # Needs ESP-IDF v6.1 (GB-Link Switch LDN pins commit fff9895c82d744c7237be8847347bdd1b07c6643), installed for every chip it builds
-# (install.ps1 esp32,esp32c3,esp32c6,esp32s3). In PowerShell, set it up first:
+# (install.ps1 esp32,esp32s2,esp32c3,esp32c6,esp32s3). In PowerShell, set it up first:
 #   . <ESP-IDF v6.1>\export.ps1
 # then, from this folder:
 #   .\package-release-bin.ps1                       # everything: ..\..\release\esp32-uds-bridge-2.0-<line>-<chip>.bin
@@ -26,7 +26,7 @@ param(
     [Alias("Line", "Profile", "Board")]
     [ValidateSet("all", "uds", "aio", "1", "2", "gblink", "vcadapter")]
     [string]$Target = "all",
-    [ValidateSet("all", "esp32", "esp32c3", "esp32c6", "esp32s3")]
+    [ValidateSet("all", "esp32", "esp32s2", "esp32c3", "esp32c6", "esp32s3")]
     [string]$Chip = "all",
     [string]$OutputDir = (Join-Path $PSScriptRoot "..\..\release")
 )
@@ -46,7 +46,7 @@ if ($idfVersion -notmatch "v6\.1") {
 $version = "2.0"
 # Each line: its sdkconfig defaults and the chips it is built for.
 $lines = [ordered]@{
-    uds = @{ defaults = "sdkconfig.defaults"; chips = @("esp32s3", "esp32", "esp32c3", "esp32c6") }
+    uds = @{ defaults = "sdkconfig.defaults"; chips = @("esp32s3", "esp32", "esp32s2", "esp32c3", "esp32c6") }
     aio = @{ defaults = "sdkconfig.defaults;sdkconfig.aio"; chips = @("esp32s3") }
 }
 $aliases = @{ "1" = "uds"; "gblink" = "uds"; "2" = "aio"; "vcadapter" = "aio" }
@@ -87,7 +87,7 @@ try {
             Push-Location $buildDir
             try {
                 # The same layout `idf.py flash` uses (flash_args carries the offsets, and the flash mode, speed and size), merged into
-                # one image written at 0x0. The classic ESP32's bootloader sits at 0x1000 in it, the other chips' at 0x0.
+                # one image written at 0x0. The classic ESP32 and S2 bootloaders sit at 0x1000 in it, the other chips' at 0x0.
                 $ErrorActionPreference = "Continue"
                 python -m esptool --chip $c merge-bin -o $out "@flash_args"
                 $merged = $LASTEXITCODE -eq 0

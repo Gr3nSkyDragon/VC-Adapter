@@ -59,8 +59,20 @@ static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *
     xSemaphoreTake(s_write_lock, portMAX_DELAY);
     size_t encoded = uds_wire_encode(type, seq, flags, payload, length, s_encoded, UDS_WIRE_MAX_ENCODED);
     size_t sent = 0;
+#if CONFIG_IDF_TARGET_ESP32S2
+    /* A partial frame needs its own delimiter before the next complete frame. */
+    static bool needs_delimiter = true;
+    const uint8_t delimiter = 0;
+    const TickType_t wait = pdMS_TO_TICKS(500);
+    if (encoded && needs_delimiter && !bridge_transport_write_wait(&delimiter, 1, wait)) {
+        radio_note_usb_dropped();
+        encoded = 0;
+    }
+#else
+    const TickType_t wait = pdMS_TO_TICKS(100);
+#endif
     while (encoded && sent < encoded) {
-        int written = bridge_transport_write_wait(s_encoded + sent, encoded - sent, pdMS_TO_TICKS(100));
+        int written = bridge_transport_write_wait(s_encoded + sent, encoded - sent, wait);
         if (written <= 0) {
             /* The host is not reading (port closed). Drop the frame; the COBS delimiter that
              * starts the next one resynchronizes the receiver. */
@@ -69,6 +81,9 @@ static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *
         }
         sent += (size_t)written;
     }
+#if CONFIG_IDF_TARGET_ESP32S2
+    if (encoded) needs_delimiter = sent < encoded;
+#endif
     xSemaphoreGive(s_write_lock);
 }
 
@@ -284,7 +299,7 @@ void app_main(void)
     s_encoded = malloc(UDS_WIRE_MAX_ENCODED);
     s_event_item = malloc(1 + UDS_WIRE_MAX_PAYLOAD);
     uds_wire_decoder_t *decoder = malloc(sizeof(*decoder));
-    configASSERT(s_encoded && s_event_item && decoder);
+    configASSERT(s_write_lock && s_rx_ring && s_encoded && s_event_item && decoder);
 
     bridge_transport_open(CONFIG_UDS_HOST_RX_BUFFER, CONFIG_UDS_HOST_TX_BUFFER);
 
