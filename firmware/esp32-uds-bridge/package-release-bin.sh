@@ -4,20 +4,22 @@
 #
 # Needs ESP-IDF v6.1 (commit fff9895c82d744c7237be8847347bdd1b07c6643) installed for every chip it builds
 # (./install.sh esp32,esp32c3,esp32c6,esp32s3), set up first:  . <ESP-IDF v6.1>/export.sh
-#   ./package-release-bin.sh                      # everything: ../../release/esp32-uds-bridge-2.0-<line>-<chip>.bin
-#   ./package-release-bin.sh uds                  # 2.0-uds for the four chips
+#   ./package-release-bin.sh                      # everything: ../../release/esp32-uds-bridge-2.1-<line>-<chip>.bin
+#   ./package-release-bin.sh uds                  # 2.1-uds (3DS side only: Azahar, PokeUDS) for the four chips
 #   ./package-release-bin.sh uds esp32c6          # one image
-#   ./package-release-bin.sh aio                  # 2.0-aio (esp32s3)
+#   ./package-release-bin.sh ldn                  # 2.1-ldn (3DS and Switch sides: mGBA-LDN) for the four chips
+#   ./package-release-bin.sh aio                  # 2.1-aio (esp32s3)
 #   OUTPUT_DIR=/some/folder ./package-release-bin.sh
 set -euo pipefail
 
 line=${1:-all}
 chip=${2:-all}
-version=2.0
-case "$line" in 1|gblink) line=uds ;; 2|vcadapter) line=aio ;; all|uds|aio) ;; *) echo "line: all, uds or aio" >&2; exit 2 ;; esac
+version=2.1
+# 1 / gblink was the build with both sides (1.8, then 2.0-uds): the ldn line now. "uds" has meant the 3DS side alone since 2.1.
+case "$line" in 1|gblink) line=ldn ;; 2|vcadapter) line=aio ;; all|uds|ldn|aio) ;; *) echo "line: all, uds, ldn or aio" >&2; exit 2 ;; esac
 case "$chip" in all|esp32|esp32c3|esp32c6|esp32s3) ;; *) echo "chip: all, esp32, esp32c3, esp32c6 or esp32s3" >&2; exit 2 ;; esac
 if [ "$line" = aio ] && [ "$chip" != all ] && [ "$chip" != esp32s3 ]; then
-    echo "2.0-aio is for the ESP32-S3 only (the VC-Adapter board); there is no aio build for $chip" >&2; exit 2
+    echo "2.1-aio is for the ESP32-S3 only (the VC-Adapter board); there is no aio build for $chip" >&2; exit 2
 fi
 command -v idf.py > /dev/null || { echo "idf.py not found. Set up ESP-IDF v6.1 first: . <ESP-IDF v6.1>/export.sh" >&2; exit 1; }
 idf_version=$(idf.py --version 2>&1)
@@ -28,9 +30,10 @@ out_dir=${OUTPUT_DIR:-$here/../../release}
 mkdir -p "$out_dir"
 out_dir=$(cd "$out_dir" && pwd)
 
-defaults_uds="sdkconfig.defaults";                chips_uds="esp32s3 esp32 esp32c3 esp32c6"
+defaults_uds="sdkconfig.defaults;sdkconfig.uds";  chips_uds="esp32s3 esp32 esp32c3 esp32c6"
+defaults_ldn="sdkconfig.defaults";                chips_ldn="esp32s3 esp32 esp32c3 esp32c6"
 defaults_aio="sdkconfig.defaults;sdkconfig.aio";  chips_aio="esp32s3"
-lines=$([ "$line" = all ] && echo "uds aio" || echo "$line")
+lines=$([ "$line" = all ] && echo "uds ldn aio" || echo "$line")
 
 cd "$here"
 for l in $lines; do

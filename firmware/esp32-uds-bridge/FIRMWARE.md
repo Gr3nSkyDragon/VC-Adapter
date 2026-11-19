@@ -1,27 +1,37 @@
-# Firmware lines and chips (2.0)
+# Firmware lines and chips (2.1)
 
-esp32-uds-bridge 2.0 comes as two firmware lines, built from this one source tree:
+esp32-uds-bridge 2.1 comes as three firmware lines, built from this one source tree:
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.0-uds** | 1.8, profile 1, `gblink` | A board on a PC's or phone's USB: the bridge for **mGBA, Azahar and PokeUDS** (and a GB-Link through `uds-gblink-relay` or GB-Link's own clients) | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
-| **2.0-aio** | 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the **GB/GBA games**, wired to the console's link port (`../../VC-Adapter-DIY`), no PC | The 3DS side and the link port, running on its own. Game Boy side only for now (beta) | ESP32-S3 only |
+| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
+| **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for **mGBA-LDN** (and a GB-Link through `uds-gblink-relay` or GB-Link's own clients) | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks: a restart each way | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
+| **2.1-aio** | 2.0-aio; 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the **GB/GBA games**, wired to the console's link port (`../../VC-Adapter-DIY`), no PC | The 3DS side and the link port, running on its own. Game Boy side only for now (beta) | ESP32-S3 only |
 
-Both lines report firmware **2.0** in HELLO_ACK; its link-port feature bit tells them apart, as it did between 1.8 and 1.9. The
-line is also in the app's version (`2.0-uds`, `2.0-aio`, which uds-esp32-setup reads) and in the image's name:
+**The name `uds` changed meaning in 2.1.** 2.0-uds had both sides; that line is 2.1-ldn now, and 2.1-uds is the 3DS side alone.
+Azahar and PokeUDS work on either (2.1-ldn restarts once into 3DS mode when they connect, as 2.0-uds did).
+
+Every line reports firmware **2.1** in HELLO_ACK, and its features byte tells them apart: the link-port bit (`0x01`) marks aio, as it
+did between 1.8 and 1.9, and the no-Switch bit (`0x04`, `UDS_HELLO_FEATURE_NO_SWITCH`) is set whenever the image has no Switch side
+(uds and aio). Neither bit: ldn. Firmware 2.0 and older never set `0x04`. The line is also in the app's version (`2.1-uds`, `2.1-ldn`,
+`2.1-aio`, which uds-esp32-setup reads) and in the image's name:
 
 ```
-esp32-uds-bridge-2.0-uds-esp32s3.bin
-esp32-uds-bridge-2.0-uds-esp32.bin      (alpha)
-esp32-uds-bridge-2.0-uds-esp32c3.bin    (alpha)
-esp32-uds-bridge-2.0-uds-esp32c6.bin    (alpha)
-esp32-uds-bridge-2.0-aio-esp32s3.bin    (beta)
+esp32-uds-bridge-2.1-uds-esp32s3.bin
+esp32-uds-bridge-2.1-uds-esp32.bin      (alpha)
+esp32-uds-bridge-2.1-uds-esp32c3.bin    (alpha)
+esp32-uds-bridge-2.1-uds-esp32c6.bin    (alpha)
+esp32-uds-bridge-2.1-ldn-esp32s3.bin
+esp32-uds-bridge-2.1-ldn-esp32.bin      (alpha)
+esp32-uds-bridge-2.1-ldn-esp32c3.bin    (alpha)
+esp32-uds-bridge-2.1-ldn-esp32c6.bin    (alpha)
+esp32-uds-bridge-2.1-aio-esp32s3.bin    (beta)
 ```
 
 Each is merged (bootloader, partition table, app) and written at offset **`0x0`**, gaps included, so flashing erases the stored
 keys. Inside the classic ESP32's image the bootloader sits at `0x1000` (that chip's ROM looks for it there); on the other three it
 sits at `0x0`. `package-release-bin.ps1` (Windows) and `package-release-bin.sh` (Linux, macOS, WSL) build them all with ESP-IDF
-v6.1 installed for the four chips; `-Line uds|aio` and `-Chip <chip>` (or `./package-release-bin.sh <line> <chip>`) build one.
+v6.1 installed for the four chips; `-Line uds|ldn|aio` and `-Chip <chip>` (or `./package-release-bin.sh <line> <chip>`) build one.
 
 ## What is alpha
 
@@ -33,6 +43,11 @@ The S3's 2.0-uds is the 1.8 firmware with three changes: its version and name, `
 the vendored `ldn/ldn_keys.c` fix (a 40-byte stack overrun upstream, below). Its other settings came out identical to 1.8's
 (sdkconfig compared), and its image is within 40 bytes of 1.8's. **2.0 on the S3 is unmeasured too** until it has been flashed
 and a trade done; 1.8's measurements (README, "On hardware") carry over only as far as these changes leave them.
+
+2.1 changes three things from 2.0: the version, the no-Switch feature bit, and the uds line (`sdkconfig.uds`, the Switch side
+turned off, the same switch the aio line has always used). 2.1-ldn is 2.0-uds under its new name. All nine 2.1 images built
+(2026-11-19, ESP-IDF v6.1 `fff9895c`) with no new warnings; the uds image links none of the Switch side's code. **None has run on
+a board yet**: flash an S3 with 2.1-uds and check that HELLO answers at once with features `0x04` and that the port never drops.
 
 ## Per chip
 
@@ -108,7 +123,11 @@ What a host has to do differently for the new chips:
   resets (or lands in its ROM loader).
 - **Flashing.** Pick the image by the detected chip; all are written at `0x0`. A host that checks the image should expect the
   classic ESP32's bootloader header at `0x1000` of the file, the other chips' at `0x0`.
-- uds-esp32-setup (this repository's `tools/`) knows the 2.0 names, but still flashes ESP32-S3 boards only.
+- uds-esp32-setup (this repository's `tools/`) knows the 2.1 names (and reads a 2.0-uds image as the ldn line), but still
+  flashes ESP32-S3 boards only.
+- **A board that restarts on HELLO** (the ldn line, 2.0-uds, 1.8) drops its USB port and enumerates again. A host should find
+  it again by its USB serial number (the chip's MAC on the S3, C3 and C6), not by the port's old name: macOS can give it
+  another `/dev/cu.usbmodem...`. The uds line never restarts, so it never comes up.
 
 ## Sources
 

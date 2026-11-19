@@ -56,6 +56,8 @@
  * board profile has LINK_PORT, the GB-Link profile neither. */
 #define UDS_HELLO_FEATURE_LINK_PORT 0x01 /* CONFIG_UDS_LINK_PORT: the console's link port on this board's GPIOs */
 #define UDS_HELLO_FEATURE_PICO_UART 0x02 /* reserved, never set: 1.7's optional GB-Link on the UART, dropped in 1.8 */
+#define UDS_HELLO_FEATURE_NO_SWITCH 0x04 /* 2.1 on: no Switch side (the uds and aio lines), so it boots in 3DS mode and HELLO never
+                                          * restarts it. Clear on the ldn line, and on every 2.0 and older image. */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */
 #define UDS_EVT_LOG 0x84       /* {text...} */

@@ -116,6 +116,7 @@ bool udsEsp32DecoderFeed(struct UDSEsp32Decoder* decoder, uint8_t byte, struct U
 enum {
 	UDS_ESP32_FEATURE_LINK_PORT = 0x01, // the console's link port on the board's GPIOs: the VC-Adapter board profile
 	UDS_ESP32_FEATURE_PICO_UART = 0x02, // a GB-Link wired to the board's UART
+	UDS_ESP32_FEATURE_NO_SWITCH = 0x04, // 2.1 on: no Switch side (the uds and aio lines), so HELLO never restarts the board
 };
 
 struct UDSEsp32Info {

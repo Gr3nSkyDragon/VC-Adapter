@@ -5,8 +5,9 @@ config UDS_SWITCH_LDN
     default y
     help
         GB-Link Switch LDN's bridge (ldn/), with the board switching between it and the 3DS side by what the host speaks. Its GBA
-        side drives a GB-Link Pico (on the UART, or through a host), so the GB-Link profile has it. The VC-Adapter board profile
-        turns it off until that board has a GBA side of its own (its link port pins are the Pico UART's defaults). Ignored with
+        side drives a GB-Link Pico (on the UART, or through a host), so the ldn line has it. The uds line turns it off
+        (sdkconfig.uds: its hosts only speak 3DS, so the board never has to restart into the other mode), and so does the aio line
+        until the VC-Adapter board has a GBA side of its own (its link port pins are the Pico UART's defaults). Ignored with
         ESP-IDF 5.x, which cannot build it.
 
 config UDS_FIRMWARE_MAJOR
@@ -15,19 +16,22 @@ config UDS_FIRMWARE_MAJOR
 
 config UDS_FIRMWARE_MINOR
     int
-    default 0
+    default 1
     help
-        The firmware's version, <major>.<minor>, which HELLO_ACK reports. Both lines are 2.0 (the uds line was 1.8, the aio line
-        1.9); HELLO_ACK's link-port feature bit tells them apart, as it did between 1.8 and 1.9.
+        The firmware's version, <major>.<minor>, which HELLO_ACK reports. Every line is 2.1 (2.0 had two: its uds line, now the ldn
+        line, and aio; 1.8 and 1.9 before them). HELLO_ACK's features tell them apart: the link-port bit marks aio, the no-Switch bit
+        marks uds (and aio), and neither marks ldn.
 
 config UDS_FIRMWARE_LINE
     string
     default "aio" if UDS_LINK_PORT
+    default "ldn" if UDS_SWITCH_LDN
     default "uds"
     help
-        Which firmware this is, in its name and app version (2.0-uds, 2.0-aio): "uds", the bridge for a board on a PC's or phone's
-        USB (mGBA, Azahar, PokeUDS; 3DS side + Switch side), or "aio", the standalone VC-Adapter board for the GB/GBA games (link
-        port; beta, Game Boy side only).
+        Which firmware this is, in its name and app version (2.1-uds, 2.1-ldn, 2.1-aio): "uds", the 3DS side alone for a board on a
+        computer (sdkconfig.uds: Azahar, PokeUDS); "ldn", the 3DS side and GB-Link Switch LDN's Switch side, switching by what the
+        host speaks (sdkconfig.defaults: mGBA-LDN; 2.0 called it uds); or "aio", the standalone VC-Adapter board for the GB/GBA
+        games (sdkconfig.aio: link port; beta, Game Boy side only).
 
 menu "Memory (per chip)"
 

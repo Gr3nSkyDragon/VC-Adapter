@@ -26,7 +26,7 @@
 #include "uds_wire.h"
 
 #define FW_MAJOR CONFIG_UDS_FIRMWARE_MAJOR
-#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR /* 2.0 both lines, uds and aio (was 1.8 and 1.9): Kconfig.projbuild */
+#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR /* 2.1 every line, uds, ldn and aio (2.0; 1.8 and 1.9 before): Kconfig.projbuild */
 #define PROTOCOL_VERSION UDS_WIRE_VERSION
 
 /* What this build was made with, for HELLO_ACK: the VC-Adapter board profile has the link port, the GB-Link profile neither. */
@@ -34,6 +34,12 @@
 #define FEATURE_LINK_PORT UDS_HELLO_FEATURE_LINK_PORT
 #else
 #define FEATURE_LINK_PORT 0
+#endif
+/* No Switch side in this image (the uds and aio lines, or any ESP-IDF 5.x build): it boots in 3DS mode and HELLO never restarts it. */
+#if !UDS_HAVE_LDN
+#define FEATURE_NO_SWITCH UDS_HELLO_FEATURE_NO_SWITCH
+#else
+#define FEATURE_NO_SWITCH 0
 #endif
 #define RX_RING_BYTES CONFIG_UDS_EVENT_RING_BYTES /* 48 KB on the S3 and C6, 16 KB on the classic and C3 */
 #define STATS_INTERVAL_US (5 * 1000 * 1000)
@@ -224,7 +230,7 @@ static void handle_command(uds_wire_frame_t *frame)
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
-        payload[9] = FEATURE_LINK_PORT;
+        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }
