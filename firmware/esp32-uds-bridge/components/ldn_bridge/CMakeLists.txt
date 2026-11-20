@@ -11,6 +11,12 @@ if(IDF_TARGET STREQUAL "esp32s2")
         INCLUDE_DIRS "${BRIDGE_COMMON}"
         REQUIRES freertos
     )
+    # No Switch side here, but the 3DS side's raw-frame override (main/radio.c, -zmuldefs) replaces a function inside the closed
+    # Wi-Fi driver, so the S2's driver binary is pinned as the other chips' are: ESP-IDF v6.1's libnet80211.a for the S2, in which
+    # ieee80211_raw_frame_sanity_check is a global function, as on the other chips. A different binary has to be checked again.
+    if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+        bridge_pin_wifi_driver(esp32s2 "df1a279db19ac84febf0c3b140f9c2a20d2ca2b629463bbc80641fa0d5d74511")
+    endif()
     return()
 endif()
 

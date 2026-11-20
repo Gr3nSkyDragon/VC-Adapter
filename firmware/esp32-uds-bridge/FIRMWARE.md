@@ -4,7 +4,7 @@ esp32-uds-bridge 2.1 comes as three firmware lines, built from this one source t
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
+| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6, ESP32-S2 |
 | **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for **mGBA-LDN** (and a GB-Link through `uds-gblink-relay` or GB-Link's own clients) | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks: a restart each way | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
 | **2.1-aio** | 2.0-aio; 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the **GB/GBA games**, wired to the console's link port (`../../VC-Adapter-DIY`), no PC | The 3DS side and the link port, running on its own. Game Boy side only for now (beta) | ESP32-S3 only |
 
@@ -21,6 +21,7 @@ esp32-uds-bridge-2.1-uds-esp32s3.bin
 esp32-uds-bridge-2.1-uds-esp32.bin      (alpha)
 esp32-uds-bridge-2.1-uds-esp32c3.bin    (alpha)
 esp32-uds-bridge-2.1-uds-esp32c6.bin    (alpha)
+esp32-uds-bridge-2.1-uds-esp32s2.bin    (alpha; the uds line only)
 esp32-uds-bridge-2.1-ldn-esp32s3.bin
 esp32-uds-bridge-2.1-ldn-esp32.bin      (alpha)
 esp32-uds-bridge-2.1-ldn-esp32c3.bin    (alpha)
@@ -138,7 +139,9 @@ builds the same vendored `ldn/` for five chips. The `BBPLL_RECALIB` setting and 
 
 ## ESP32-S2 with native USB CDC
 
-The experimental Flipper Wi-Fi Developer Board build uses the `2.0-uds` release format.
+The experimental ESP32-S2 build (made on a Flipper Wi-Fi Developer Board) is in the **uds line only**: GB-Link Switch LDN has no
+S2 build, so `UDS_SWITCH_LDN` cannot be turned on for this chip, and its HELLO_ACK sets the no-Switch bit (`0x04`) as 2.1-uds does
+on the other chips. There is no S2 ldn image.
 The USB OTG port runs TinyUSB CDC in slave mode to avoid the ESP32-S2 USB-105 erratum.
 This target starts directly in 3DS radio mode, with smaller Wi-Fi buffers and no on-board
 Game Boy wrapper or OLED profile. PokeUDS handles the game protocol on the computer.
@@ -150,7 +153,7 @@ Build the merged release image with ESP-IDF 6.1 and its ESP32-S2 tools installed
 ```
 
 To enter download mode, hold BOOT, press and release RESET, then release BOOT. The merged
-`esp32-uds-bridge-2.0-uds-esp32s2.bin` writes at offset `0x0`; its bootloader is at
+`esp32-uds-bridge-2.1-uds-esp32s2.bin` writes at offset `0x0`; its bootloader is at
 `0x1000` inside the file.
 
 The standalone `2.0-uds` image was tested on a Flipper Wi-Fi Developer Board (ESP32-S2
@@ -158,3 +161,11 @@ rev 0.0) with arm64 macOS. USB HELLO passed after a physical cable replug. Wi-Fi
 scanned channels 1, 6, and 11 for 20 seconds, and answered HELLO again afterward. The driver
 received 1,781 Wi-Fi frames with no USB drops or malformed USB frames. No 3DS hosts were
 heard. Retail 2DS/3DS discovery, encrypted communication, and trading remain untested.
+
+On 2.1 (2026-11-20) the S2 image is built with `sdkconfig.uds`, as the other chips' uds images are, and the S2's Wi-Fi driver is
+pinned (SHA-256 `df1a279d...`); in its ELF `ieee80211_raw_frame_sanity_check` resolves to `main/radio.c`'s override. TinyUSB's
+port does not take esptool's DTR/RTS reset, so every flash starts from download mode (BOOT held at reset) and ends with RESET. Its USB serial number is TinyUSB's default, `123456`, on every S2, so it does not tell boards apart (the uds
+line never restarts, so a host has no need to find it again). The TinyUSB components are pinned to exact versions in
+`components/ldn_bridge/idf_component.yml`; the component manager's `dependencies.lock` is per target, so it is not kept.
+2.1-uds on an S2 has not been run on a board yet; the next
+board is a Lolin S2 Mini.
