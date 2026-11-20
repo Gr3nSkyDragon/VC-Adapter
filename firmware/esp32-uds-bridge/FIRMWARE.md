@@ -167,5 +167,6 @@ pinned (SHA-256 `df1a279d...`); in its ELF `ieee80211_raw_frame_sanity_check` re
 port does not take esptool's DTR/RTS reset, so every flash starts from download mode (BOOT held at reset) and ends with RESET. Its USB serial number is TinyUSB's default, `123456`, on every S2, so it does not tell boards apart (the uds
 line never restarts, so a host has no need to find it again). The TinyUSB components are pinned to exact versions in
 `components/ldn_bridge/idf_component.yml`; the component manager's `dependencies.lock` is per target, so it is not kept.
-2.1-uds on an S2 has not been run on a board yet; the next
-board is a Lolin S2 Mini.
+On a board (2026-11-20): this 2.1-uds S2 image, installed by PokeUDS's Board page on a Lolin (Wemos) S2 Mini v1.0.0
+(ESP32-S2FN4R2, 4 MB flash, 2 MB PSRAM), traded **Gen 6** with a retail 3DS through PokeUDS. Other generations, the
+other 3DS hosts (Azahar) and the throughput under a busy room are not yet tried on an S2.
