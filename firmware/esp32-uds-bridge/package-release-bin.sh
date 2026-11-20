@@ -60,7 +60,7 @@ for l in $lines; do
         # The layout `idf.py flash` uses (flash_args), merged into one image written at 0x0. The classic ESP32 and S2 bootloaders sit at
         # 0x1000 in it, the other chips' at 0x0.
         (cd "$build_dir" && python -m esptool --chip "$c" merge-bin -o "$out" "@flash_args")
-        status=""; [ "$c" = esp32s3 ] || status=" (alpha, not yet run on hardware)"
+        status=""; [ "$c" = esp32s3 ] || [ "$c" = esp32s2 ] || status=" (alpha, not yet run on hardware)"
         echo "$out  ($(stat -c %s "$out" 2>/dev/null || stat -f %z "$out") bytes) - firmware $version-$l for $c$status, flash at offset 0x0"
     done
 done

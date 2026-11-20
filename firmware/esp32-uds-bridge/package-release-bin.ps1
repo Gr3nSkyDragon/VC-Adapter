@@ -4,8 +4,8 @@
 # Three firmware lines, from the same code (FIRMWARE.md):
 #   uds  firmware 2.1-uds (new in 2.1; sdkconfig.defaults + sdkconfig.uds): the 3DS side alone, for a board on a PC whose host only
 #        speaks 3DS (Azahar, PokeUDS). It boots in 3DS mode, so HELLO never restarts it.
-#        Every chip: esp32s3, and esp32, esp32s2, esp32c3 and esp32c6 (alpha: built, not yet run on hardware). The S2 has this
-#        line only (no Switch side).
+#        Every chip: esp32s3 and esp32s2, and esp32, esp32c3 and esp32c6 (alpha: built, not yet run on hardware). The S2 has
+#        this line only (no Switch side).
 #   ldn  firmware 2.1-ldn (2.0-uds before, 1.8 / profile 1 / "gblink" before that; sdkconfig.defaults): the 3DS side and GB-Link
 #        Switch LDN's Switch side, switching by what the host speaks, for mGBA-LDN (and a GB-Link). Every chip but the S2.
 #   aio  firmware 2.1-aio, beta (was 1.9, profile 2, "vcadapter"; sdkconfig.defaults + sdkconfig.aio): the standalone VC-Adapter board
@@ -104,7 +104,7 @@ try {
                 if (-not $merged) { throw "merge-bin failed for $l on $c" }
             } finally { Pop-Location }
 
-            $status = if ($c -eq "esp32s3") { "" } else { " (alpha, not yet run on hardware)" }
+            $status = if ($c -eq "esp32s3" -or $c -eq "esp32s2") { "" } else { " (alpha, not yet run on hardware)" }
             "{0}  ({1:N0} bytes) - firmware {2}-{3} for {4}{5}, flash at offset 0x0" -f $out, (Get-Item $out).Length, $version, $l, $c, $status
         }
     }

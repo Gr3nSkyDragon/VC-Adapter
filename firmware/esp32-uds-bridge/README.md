@@ -1,7 +1,7 @@
 # esp32-uds-bridge
 
-Firmware for an **ESP32-S3** (and, as alpha builds not yet run on hardware, the classic **ESP32**, **ESP32-C3**,
-**ESP32-C6** and, the 3DS side only, **ESP32-S2**: see [FIRMWARE.md](FIRMWARE.md)) that acts as the 802.11 radio for Azahar's local wireless (UDS) on
+Firmware for an **ESP32-S3**, an **ESP32-S2** (the 3DS side only), and, as alpha builds not yet run on hardware, the
+classic **ESP32**, **ESP32-C3** and **ESP32-C6** (see [FIRMWARE.md](FIRMWARE.md)) that acts as the 802.11 radio for Azahar's local wireless (UDS) on
 Android, in place of the USB Wi-Fi adapter and `ldnd.exe` used on Windows. The phone talks to the
 board over USB-C; the board captures and injects raw Wi-Fi frames so the emulator can trade with a
 retail 3DS.
@@ -25,7 +25,7 @@ and what is alpha). **`uds` changed meaning in 2.1**: 2.0-uds had both sides and
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.1-uds** | new in 2.1 | A board on a PC's USB whose host only speaks 3DS: Azahar, PokeUDS (and mGBA's 3DS side) | The 3DS side alone: it boots in 3DS mode, so a host connecting never restarts it or drops its USB port | ESP32-S3; alpha: ESP32, C3, C6, S2 |
+| **2.1-uds** | new in 2.1 | A board on a PC's USB whose host only speaks 3DS: Azahar, PokeUDS (and mGBA's 3DS side) | The 3DS side alone: it boots in 3DS mode, so a host connecting never restarts it or drops its USB port | ESP32-S3, S2; alpha: ESP32, C3, C6 |
 | **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for mGBA-LDN, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks | ESP32-S3; alpha: ESP32, C3, C6 |
 | **2.1-aio** | 2.0-aio; 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the GB/GBA games, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the link port, running on its own. Game Boy only for now: no Switch side until the board has a GBA side of its own | ESP32-S3 only |
 
@@ -144,7 +144,7 @@ Each release ships one file per line and chip (bootloader, partition table and a
 `esp32-uds-bridge-2.1-uds-<chip>.bin`, **firmware 2.1-uds**, for a board on the PC's USB used by Azahar or PokeUDS (the 3DS side
 alone); `esp32-uds-bridge-2.1-ldn-<chip>.bin`, **firmware 2.1-ldn**, for one used by mGBA-LDN or a GB-Link through
 uds-gblink-relay (the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks); both for `esp32s3` and,
-as alpha builds not yet run on hardware, `esp32`, `esp32c3` and `esp32c6`; and `esp32-uds-bridge-2.1-aio-esp32s3.bin`, **firmware
+as alpha builds not yet run on hardware, `esp32`, `esp32c3` and `esp32c6`; 2.1-uds also for `esp32s2`; and `esp32-uds-bridge-2.1-aio-esp32s3.bin`, **firmware
 2.1-aio (beta)**, for the VC-Adapter board on the console's link port (Game Boy side only for now). In 2.0 the ldn line was
 `esp32-uds-bridge-2.0-uds-<chip>.bin`; before 2.0 the images were `esp32-uds-bridge-fw1.8-esp32s3-gblink.bin` and
 `esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`; images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link

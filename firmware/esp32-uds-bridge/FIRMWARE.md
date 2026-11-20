@@ -4,7 +4,7 @@ esp32-uds-bridge 2.1 comes as three firmware lines, built from this one source t
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6, ESP32-S2 |
+| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3, ESP32-S2; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
 | **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for **mGBA-LDN** (and a GB-Link through `uds-gblink-relay` or GB-Link's own clients) | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks: a restart each way | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
 | **2.1-aio** | 2.0-aio; 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the **GB/GBA games**, wired to the console's link port (`../../VC-Adapter-DIY`), no PC | The 3DS side and the link port, running on its own. Game Boy side only for now (beta) | ESP32-S3 only |
 
@@ -21,7 +21,7 @@ esp32-uds-bridge-2.1-uds-esp32s3.bin
 esp32-uds-bridge-2.1-uds-esp32.bin      (alpha)
 esp32-uds-bridge-2.1-uds-esp32c3.bin    (alpha)
 esp32-uds-bridge-2.1-uds-esp32c6.bin    (alpha)
-esp32-uds-bridge-2.1-uds-esp32s2.bin    (alpha; the uds line only)
+esp32-uds-bridge-2.1-uds-esp32s2.bin    (the uds line only)
 esp32-uds-bridge-2.1-ldn-esp32s3.bin
 esp32-uds-bridge-2.1-ldn-esp32.bin      (alpha)
 esp32-uds-bridge-2.1-ldn-esp32c3.bin    (alpha)
@@ -36,7 +36,7 @@ v6.1 installed for the five chips; `-Line uds|ldn|aio` and `-Chip <chip>` (or `.
 
 ## What is alpha
 
-**Only the ESP32-S3 has run this firmware.** The classic ESP32, C3 and C6 images build and link cleanly with ESP-IDF v6.1
+**The ESP32-S3 and, since 2026-11-20, the ESP32-S2 (its uds line, below) have run this firmware.** The classic ESP32, C3 and C6 images build and link cleanly with ESP-IDF v6.1
 (`fff9895c`) and pass the static checks below; nothing else about them is known. Treat every figure for those chips in this
 file and in `sdkconfig.defaults.<chip>` as **unmeasured** until it has been seen on a board.
 
@@ -139,7 +139,7 @@ builds the same vendored `ldn/` for five chips. The `BBPLL_RECALIB` setting and 
 
 ## ESP32-S2 with native USB CDC
 
-The experimental ESP32-S2 build (made on a Flipper Wi-Fi Developer Board) is in the **uds line only**: GB-Link Switch LDN has no
+The ESP32-S2 build (made on a Flipper Wi-Fi Developer Board, out of alpha after a Gen 6 trade on an S2 Mini) is in the **uds line only**: GB-Link Switch LDN has no
 S2 build, so `UDS_SWITCH_LDN` cannot be turned on for this chip, and its HELLO_ACK sets the no-Switch bit (`0x04`) as 2.1-uds does
 on the other chips. There is no S2 ldn image.
 The USB OTG port runs TinyUSB CDC in slave mode to avoid the ESP32-S2 USB-105 erratum.
