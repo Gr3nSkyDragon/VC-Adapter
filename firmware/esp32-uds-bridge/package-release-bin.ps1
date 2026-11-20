@@ -4,20 +4,21 @@
 # Three firmware lines, from the same code (FIRMWARE.md):
 #   uds  firmware 2.1-uds (new in 2.1; sdkconfig.defaults + sdkconfig.uds): the 3DS side alone, for a board on a PC whose host only
 #        speaks 3DS (Azahar, PokeUDS). It boots in 3DS mode, so HELLO never restarts it.
-#        Every chip: esp32s3, and esp32, esp32c3 and esp32c6 (alpha: built, not yet run on hardware).
+#        Every chip: esp32s3, and esp32, esp32s2, esp32c3 and esp32c6 (alpha: built, not yet run on hardware). The S2 has this
+#        line only (no Switch side).
 #   ldn  firmware 2.1-ldn (2.0-uds before, 1.8 / profile 1 / "gblink" before that; sdkconfig.defaults): the 3DS side and GB-Link
-#        Switch LDN's Switch side, switching by what the host speaks, for mGBA-LDN (and a GB-Link). Every chip, as uds.
+#        Switch LDN's Switch side, switching by what the host speaks, for mGBA-LDN (and a GB-Link). Every chip but the S2.
 #   aio  firmware 2.1-aio, beta (was 1.9, profile 2, "vcadapter"; sdkconfig.defaults + sdkconfig.aio): the standalone VC-Adapter board
 #        for the GB/GBA games, the console's link port on the GPIOs. Game Boy side only for now. esp32s3 only.
 # Each builds in its own folder (build-<line>-<chip>, with its own sdkconfig) and carries its version, line and chip in the file name
 # and in the app's version (2.1-uds, 2.1-ldn, 2.1-aio), which uds-esp32-setup reads back.
 #
 # Needs ESP-IDF v6.1 (GB-Link Switch LDN pins commit fff9895c82d744c7237be8847347bdd1b07c6643), installed for every chip it builds
-# (install.ps1 esp32,esp32c3,esp32c6,esp32s3). In PowerShell, set it up first:
+# (install.ps1 esp32,esp32s2,esp32c3,esp32c6,esp32s3). In PowerShell, set it up first:
 #   . <ESP-IDF v6.1>\export.ps1
 # then, from this folder:
 #   .\package-release-bin.ps1                       # everything: ..\..\release\esp32-uds-bridge-2.1-<line>-<chip>.bin
-#   .\package-release-bin.ps1 -Line uds             # 2.1-uds (3DS side only) for the four chips
+#   .\package-release-bin.ps1 -Line uds             # 2.1-uds (3DS side only) for the five chips
 #   .\package-release-bin.ps1 -Line uds -Chip esp32s3
 #   .\package-release-bin.ps1 -Line ldn             # 2.1-ldn (3DS and Switch sides) for the four chips
 #   .\package-release-bin.ps1 -Line aio             # 2.1-aio (esp32s3)
@@ -29,7 +30,7 @@ param(
     [Alias("Line", "Profile", "Board")]
     [ValidateSet("all", "uds", "ldn", "aio", "1", "2", "gblink", "vcadapter")]
     [string]$Target = "all",
-    [ValidateSet("all", "esp32", "esp32c3", "esp32c6", "esp32s3")]
+    [ValidateSet("all", "esp32", "esp32s2", "esp32c3", "esp32c6", "esp32s3")]
     [string]$Chip = "all",
     [string]$OutputDir = (Join-Path $PSScriptRoot "..\..\release")
 )
@@ -49,7 +50,7 @@ if ($idfVersion -notmatch "v6\.1") {
 $version = "2.1"
 # Each line: its sdkconfig defaults and the chips it is built for.
 $lines = [ordered]@{
-    uds = @{ defaults = "sdkconfig.defaults;sdkconfig.uds"; chips = @("esp32s3", "esp32", "esp32c3", "esp32c6") }
+    uds = @{ defaults = "sdkconfig.defaults;sdkconfig.uds"; chips = @("esp32s3", "esp32", "esp32s2", "esp32c3", "esp32c6") }
     ldn = @{ defaults = "sdkconfig.defaults"; chips = @("esp32s3", "esp32", "esp32c3", "esp32c6") }
     aio = @{ defaults = "sdkconfig.defaults;sdkconfig.aio"; chips = @("esp32s3") }
 }
@@ -59,6 +60,9 @@ $line = if ($aliases.ContainsKey($Target)) { $aliases[$Target] } else { $Target 
 $chosen = if ($line -eq "all") { @($lines.Keys) } else { @($line) }
 if ($Chip -ne "all" -and $line -eq "aio" -and $Chip -ne "esp32s3") {
     throw "2.1-aio is for the ESP32-S3 only (the VC-Adapter board); -Chip $Chip has no aio build"
+}
+if ($Chip -eq "esp32s2" -and $line -eq "ldn") {
+    throw "the ESP32-S2 has no Switch side, so no ldn build: -Line uds"
 }
 
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
@@ -92,7 +96,7 @@ try {
             Push-Location $buildDir
             try {
                 # The same layout `idf.py flash` uses (flash_args carries the offsets, and the flash mode, speed and size), merged into
-                # one image written at 0x0. The classic ESP32's bootloader sits at 0x1000 in it, the other chips' at 0x0.
+                # one image written at 0x0. The classic ESP32 and S2 bootloaders sit at 0x1000 in it, the other chips' at 0x0.
                 $ErrorActionPreference = "Continue"
                 python -m esptool --chip $c merge-bin -o $out "@flash_args"
                 $merged = $LASTEXITCODE -eq 0

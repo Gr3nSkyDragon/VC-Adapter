@@ -228,7 +228,11 @@ static esp_err_t init_wifi_once(void)
         return result;
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_init());
-    esp_event_loop_create_default(); /* may already exist */
+    result = esp_event_loop_create_default();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        diag_report("after the failed esp_event_loop_create_default");
+        return result;
+    }
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     /* Raw capture and injection: this side's own buffer counts, and no aggregation. The sdkconfig keeps what GB-Link Switch LDN's
      * side is built and tested with; these numbers are this side's only, per chip (Kconfig.projbuild): 16/64/64 on the S3 (measured)

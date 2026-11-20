@@ -4,6 +4,16 @@
 # firmware has the 3DS side only.
 include("${CMAKE_CURRENT_LIST_DIR}/../../ldn/SOURCES.cmake")
 
+# The S2 runs UDS directly; its USB OTG port cannot use the Serial/JTAG driver.
+if(IDF_TARGET STREQUAL "esp32s2")
+    idf_component_register(
+        SRCS "../../ldn/transport_usb_cdc.c"
+        INCLUDE_DIRS "${BRIDGE_COMMON}"
+        REQUIRES freertos
+    )
+    return()
+endif()
+
 # The host link, by chip: the native USB Serial/JTAG port, or on the classic ESP32 (which has none) the console UART behind the
 # board's USB bridge, as upstream's firmware/ESP32 does.
 if(IDF_TARGET STREQUAL "esp32")

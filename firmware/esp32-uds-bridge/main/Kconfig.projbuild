@@ -2,6 +2,7 @@ menu "UDS bridge"
 
 config UDS_SWITCH_LDN
     bool "Switch side: GB-Link Switch LDN (needs ESP-IDF 6.1)"
+    depends on !IDF_TARGET_ESP32S2
     default y
     help
         GB-Link Switch LDN's bridge (ldn/), with the board switching between it and the 3DS side by what the host speaks. Its GBA
@@ -38,6 +39,7 @@ menu "Memory (per chip)"
 config UDS_WIFI_STATIC_RX_BUFFERS
     int "3DS side: Wi-Fi static receive buffers"
     range 2 32
+    default 10 if IDF_TARGET_ESP32S2
     default 4 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
     default 16
     help
@@ -47,18 +49,21 @@ config UDS_WIFI_STATIC_RX_BUFFERS
 config UDS_WIFI_DYNAMIC_RX_BUFFERS
     int "3DS side: Wi-Fi dynamic receive buffers"
     range 4 128
+    default 32 if IDF_TARGET_ESP32S2
     default 16 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
     default 64
 
 config UDS_WIFI_DYNAMIC_TX_BUFFERS
     int "3DS side: Wi-Fi dynamic transmit buffers"
     range 4 128
+    default 32 if IDF_TARGET_ESP32S2
     default 16 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
     default 64
 
 config UDS_EVENT_RING_BYTES
     int "3DS side: ring for received frames on their way to the host, in bytes"
     range 8192 131072
+    default 24576 if IDF_TARGET_ESP32S2
     default 16384 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32C3
     default 49152
 

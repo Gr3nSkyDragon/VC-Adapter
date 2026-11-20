@@ -10,12 +10,18 @@ else()
     set(ldn_requires ldn_bridge)
 endif()
 
+if(IDF_TARGET STREQUAL "esp32s2")
+    # PokeUDS handles the protocol on the computer. Leave heap for Wi-Fi on the S2.
+    set(gbwrap_sources "gbwrap_none.c")
+else()
+    # Game Boy wrapper sources vendored from mGBA (see gbwrap/README.md).
+    set(gbwrap_sources "gbwrap.c" "linkport.c" "gbwrap/uds-wire.c" "gbwrap/uds-cable.c"
+        "gbwrap/uds-session.c" "gbwrap/uds-pia.c" "gbwrap/uds-room.c" "gbwrap/uds-ccmp.c" "gbwrap/uds-clock.c")
+endif()
+
 idf_component_register(
-    SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "gbwrap.c" "display.c" "scene.c" "screen.c"
-         "linkport.c"
-         # The Game Boy wrapper, copied unchanged from mGBA (mgba_LDN, src/gb/sio): see gbwrap/README.md.
-         "gbwrap/uds-wire.c" "gbwrap/uds-cable.c" "gbwrap/uds-session.c" "gbwrap/uds-pia.c" "gbwrap/uds-room.c"
-         "gbwrap/uds-ccmp.c" "gbwrap/uds-clock.c"
+    SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "display.c" "scene.c" "screen.c"
+         ${gbwrap_sources}
     INCLUDE_DIRS "." "gbwrap/include"
     REQUIRES esp_wifi esp_event esp_netif esp_timer nvs_flash esp_ringbuf ${driver_requires}
              esp_hw_support esp_system esp_rom esp_adc ${ldn_requires}
