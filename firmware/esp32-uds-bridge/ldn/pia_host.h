@@ -8,13 +8,15 @@
    stream (10) per station carrying the emulated adapter's WC/WA/WD/WT/WK frames. Every
    station gets the GBA's frames; each station's frames go to the GBA as its child's. */
 
+#ifndef PIA_HOST_STATIONS
 #define PIA_HOST_STATIONS 4               /* the adapter serves four children */
+#endif
 #define PIA_HOST_PARENT_BYTES 92
 #define PIA_HOST_PARENT_SLOTS 12
 #define PIA_HOST_SHED_AT 3
 #define PIA_HOST_APP_DATA 384
 #define PIA_HOST_HOLD_SLOTS 32
-#define PIA_HOST_HOLD_BYTES 48            /* a child's frames: WT, WK, WC, and the 46-byte opener */
+#define PIA_HOST_HOLD_BYTES 96
 #define PIA_HOST_RECORD_BYTES 64
 #define PIA_HOST_WT_RING 16
 #define PIA_HOST_PROBES 8
@@ -92,6 +94,8 @@ typedef struct
     /* Child frames are delivered in order; early ones wait here. */
     int next_deliver;                 /* -1 until the child's first frame */
     struct { uint16_t seq; uint8_t data[PIA_HOST_HOLD_BYTES]; uint8_t length; bool used; } hold[PIA_HOST_HOLD_SLOTS];
+    int64_t gap_since_ms;             /* the first held frame has waited since */
+    int gaps_given_up;
     /* Sent WT frames by stamp, for RTT samples from WKs. */
     struct { uint32_t stamp; uint16_t seq; int64_t sent_ms; bool used, idle; } wt_ring[PIA_HOST_WT_RING];
     int wt_ring_head;
@@ -159,6 +163,9 @@ typedef struct
     bool property_pending;            /* new application data not yet sent */
     uint16_t adapter_id;              /* the WA's first word, +3 per group */
     uint16_t wa_id;                   /* the one this group's WAs carry */
+    /* Data frames a child may have waiting: it must cover the round trip at the GBA's frame
+       rate. A group's members are farther away in time (more stations on the air). */
+    int credit_cap;
 } pia_host_t;
 
 void pia_host_init(pia_host_t *h, const uint8_t ssid[16], const uint8_t our_mac[6], const char *our_ip,

@@ -23,3 +23,8 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# GB-Link Switch LDN 2.2's memory settings for an ESP32-S3 hosting with the adapter on the board (their 60ff8cb): a 1 KB zstd
+# literal buffer (Pia's bodies fit it; the context drops from 40 KB to 33 KB of internal RAM) and a 16 KB Switch-side USB receive
+# buffer instead of 32 KB (a board on the link port seldom has a PC sending much in Switch mode).
+CONFIG_PIA_ZSTD_LITERAL_BUFFER=1024
+CONFIG_BRIDGE_USB_RX_BUFFER=16384

@@ -298,6 +298,7 @@ static void command(const char *line)
         printf("LDN_PICO_MODE set_mode_sent=%" PRIu32 " await_mode=%d wrong_cable=%d\n",
                pico_link_mode_sent(), pico_link_await_mode() ? 1 : 0, pico_link_wrong_cable() ? 1 : 0);
         printf("LDN_PICO_GBA active=%d\n", pico_link_gba_active() ? 1 : 0);
+        printf("LDN_PICO_ADAPTER %s\n", pico_link_on_board() ? "board" : "gblink");
         uint8_t first[21];
         const uint8_t n = pico_link_first_frame(first, sizeof(first));
         if (n) {

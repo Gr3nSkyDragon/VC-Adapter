@@ -272,8 +272,10 @@ void ldn_udp_poll(bool connected)
     static uint8_t bytes[PAYLOAD_MAX + 1];
     static char hex[PAYLOAD_MAX * 2 + 1];
     static const char digits[] = "0123456789abcdef";
-    /* At most 2 datagrams per poll, so commands and the heartbeat run between bursts. */
-    for (int count = 0; count < 2; ++count) {
+    /* A few datagrams per poll, so commands and the heartbeat run between bursts; more while
+       hosting, where every station's datagrams share the socket's six-slot queue. */
+    const int per_poll = s_host_mode ? 6 : 2;
+    for (int count = 0; count < per_poll; ++count) {
         struct sockaddr_in source;
         socklen_t size = sizeof(source);
         int n = recvfrom(s_socket, bytes, sizeof(bytes), 0, (struct sockaddr *)&source, &size);

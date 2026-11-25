@@ -46,6 +46,12 @@ enum { BR_IDLE, BR_SCAN, BR_AUTH, BR_MEMBER, BR_NET, BR_RUN, BR_HOST };
 
 /* Console activity counts as a live adapter link for this long. */
 #define CONSOLE_LIVE_MS 10000
+/* The GBA counts as looking for a group (its player chose JOIN GROUP) this long after its
+   last search. A room joined for it is left once it stops without asking for the room's
+   group. */
+#define SEARCH_LIVE_MS 3000
+/* The GBA is in the Union Room while its last broadcast from there is this recent. */
+#define UNION_ROOM_MS 10000
 
 /* pokefirered constants/union_room.h: trade, single battle, double battle, multi battle,
    Pokemon Jump, Berry Crush, Dodrio Berry Picking, and a Wonder Card or Wonder News sent to
@@ -54,6 +60,9 @@ enum { BR_IDLE, BR_SCAN, BR_AUTH, BR_MEMBER, BR_NET, BR_RUN, BR_HOST };
 #define GROUP_COUNT 9
 #define GROUP_FALLBACK 3
 static const uint8_t kGroupActivity[GROUP_COUNT] = {4, 1, 2, 3, 9, 10, 11, 21, 22};
+
+/* In a group the round trip to each Switch is longer: this many frames may wait at one. */
+#define GROUP_CREDIT_CAP 12
 
 /* A multi battle and the three minigames: up to five players. The shim's repairs follow one
    child through a trade or a two-player battle, so these groups go through unchanged. */
@@ -81,7 +90,7 @@ static struct
 {
     int state;
     bool started;
-    bool restart_pending;               /* adapter on this chip: restart at the next poll */
+    bool restart_pending;               /* start over at the next poll */
     uint16_t union_connect;             /* presence devid the GBA asked to connect to, 0 none */
     bool union_join;                    /* the room joined is a Switch's Union Room presence */
     uint16_t union_devid;               /* that presence's devid, beaconed alone while joined */
@@ -137,7 +146,7 @@ static struct
        not name the request, so one goes at a time. */
     int connecting;
     uint8_t connecting_join;            /* that station's join number, to tell a reused slot */
-    bool link_noted;                    /* the adapter link's state as last printed */
+    int link_phase;                     /* the room search's state as last printed, -1 none */
     uint8_t host_channel;
     int64_t room_opened_ms, next_away;  /* the search for a Switch on other channels */
     uint8_t away_index;
@@ -438,12 +447,35 @@ static bool adapter_link_live(void)
     return pico_link_await_mode() || pico_link_gba_active();
 }
 
+/* Where the adapter reports the GBA's searches, rooms are looked for and joined only while
+   the GBA looks for a group. Elsewhere a live link stands for that, as before. */
+static bool searches_reported(void) { return pico_link_gba_search_age_ms() >= 0; }
+
+static bool gba_searching(void)
+{
+    const int64_t age = pico_link_gba_search_age_ms();
+    return age < 0 ? adapter_link_live() : age < SEARCH_LIVE_MS;
+}
+
+/* A search from the Union Room looks for the players there, not for a group's room. */
+static bool gba_wants_room(void)
+{
+    if (!gba_searching()) return false;
+    if (!searches_reported()) return true;
+    return !((g.gba_beacon[12] & 0x40) && g.gba_beacon_ms && now_ms() - g.gba_beacon_ms < UNION_ROOM_MS);
+}
+
 static void note_link(void)
 {
-    const bool live = adapter_link_live();
-    if (live == g.link_noted) return;
-    g.link_noted = live;
-    printf(live ? "LDN_BRIDGE looking for a FireRed room\n" : "LDN_BRIDGE waiting for an adapter link before joining a room\n");
+    const int phase = !adapter_link_live() ? 0 : gba_wants_room() ? 2 : 1;
+    if (phase == g.link_phase) return;
+    g.link_phase = phase;
+    static const char *const kPhase[3] = {
+        "waiting for an adapter link before joining a room",
+        "waiting for the GBA to look for a group",
+        "looking for a FireRed room",
+    };
+    printf("LDN_BRIDGE %s\n", kPhase[phase]);
 }
 
 /* ---- callbacks ------------------------------------------------------------- */
@@ -604,7 +636,7 @@ static void print_session_summary(void)
     {
         const pia_link_t *l = &g.s.link;
         dg_in = l->received; dg_out = l->sent; skipped = g.switch_skipped;
-        shed = l->shed; dropped = l->overflow; resends = -1;
+        shed = l->shed; dropped = l->overflow; resends = l->resends;
     }
     uint8_t queue_high = 0, sheds = 0;
     uint16_t queue_drops = 0, overflows = 0;
@@ -678,6 +710,7 @@ static void enter_host_mode(void)
     /* The WA carries the adapter id the record names. */
     g.host->adapter_id = g.gba_devid;
     g.host->sheddable = trade_shim_parent_sheddable;
+    if (group_activity(g.gba_beacon[12])) g.host->credit_cap = GROUP_CREDIT_CAP;
     pia_host_set_app_data(g.host, cfg->app_data, cfg->app_data_len);
     memset(g.client, 0, sizeof(g.client));
     g.connecting = -1;
@@ -895,7 +928,7 @@ void pia_bridge_start(void)
     ldn_control_set_action_handler(on_action);
     /* Mode entry resets the adapter, so skip it if a GBA is already linked. */
     if (!pico_link_gba_active()) pico_link_set_mode();
-    g.link_noted = !adapter_link_live();
+    g.link_phase = -1;
     note_link();
 }
 
@@ -913,15 +946,16 @@ void pia_bridge_stop(void)
     printf("LDN_BRIDGE stopped\n");
 }
 
-/* A finished session or failed join restarts the board, which resumes the room search.
-   After a session the adapter re-enters its mode first, which clears the old room from
-   the GBA's list. After the restart this may be skipped: once a GBA has clocked the
-   adapter, dbgAnyRx stays set and pico_link leaves it alone. */
+/* A finished session or failed join starts the bridge over. With the adapter wired to the
+   board, on this chip or a GB-Link's UART, that happens in place at the next poll. A client
+   carrying the adapter on the host port expects the board to restart and comes back after
+   it (docs/SERIAL_PROTOCOL.md); after a session the adapter it carries re-enters its mode
+   first, which clears the old room from the GBA's list. */
 static void bridge_restart(bool session_ended)
 {
     /* A hosted session can end on the GBA's side, with the Switch still in the room. */
     if (g.state == BR_HOST && g.host && pia_host_station_count(g.host) > 0 && g.session_ms) print_session_summary();
-    if (pico_link_adapter_on_chip())
+    if (pico_link_port() != PICO_PORT_HOST)
     {
         g.restart_pending = true;
         return;
@@ -929,17 +963,17 @@ static void bridge_restart(bool session_ended)
     if (session_ended)
     {
         pico_link_set_mode();
-        pico_link_flush();
         ldn_control_flush_adapter();
     }
     pia_bridge_stop();
     esp_restart();
 }
 
-/* The chip stays up for the adapter it carries: links still open end at the adapter, as
-   when a partner leaves, the radio goes back to the station role for the room search, and
-   the bridge starts over. The adapter keeps its state, so a GBA between links (in the
-   Union Room, or back at the counter) carries on. */
+/* The chip stays up, and so does the adapter, on this chip or a GB-Link's: links still
+   open end at the adapter, as when a partner leaves, the radio goes back to the station
+   role for the room search, and the bridge starts over. Rebooting would put the adapter
+   back into its mode, which strands a GBA that is using it. The adapter keeps its state,
+   so a GBA between links (in the Union Room, or back at the counter) carries on. */
 static void restart_in_place(void)
 {
     if (g.child_connected) send_command(RFU1_DISCONNECT, g.child_devid);
@@ -1172,7 +1206,7 @@ void pia_bridge_room(const ldn_network_t *net)
     if (union_room) presence_note(net, record);
     if (g.state == BR_SCAN)
     {
-        if (union_room || net->communication_id != FIRERED_ID || !adapter_link_live()) return;
+        if (union_room || net->communication_id != FIRERED_ID || !gba_wants_room()) return;
         if (net->policy == 1 || net->member_count >= net->maximum) return;
         if (s_retry.magic == RETRY_MAGIC && memcmp(net->ssid, s_retry.ssid, 16) == 0 &&
             now_ms() < s_retry_until) return;
@@ -1326,7 +1360,8 @@ void pia_bridge_poll(void)
             return;
         }
         send_presences(now);
-        if (now >= g.next_scan)
+        /* Rooms and the Union Room's players are looked for only while the GBA is. */
+        if (now >= g.next_scan && (!searches_reported() || gba_searching()))
         {
             ldn_session_scan(kChannels[g.channel_index]);
             g.channel_index = (g.channel_index + 1) % CHANNEL_COUNT;
@@ -1487,6 +1522,15 @@ void pia_bridge_poll(void)
             if (g.session_up) print_session_summary();
             trade_shim_note(now, TRADE_SHIM_NOTE_HOST_DISCONNECT, 0, 0);
             bridge_restart(true);
+            return;
+        }
+        /* The GBA's player left the group list (or went to the Union Room) without asking
+           for this room's group. */
+        if (searches_reported() && !g.union_join && !g.s.link.connect_wanted && !gba_wants_room())
+        {
+            printf("LDN_BRIDGE the GBA is no longer looking for a group: leaving the room\n");
+            if (g.session_up) print_session_summary();
+            bridge_restart(false);
             return;
         }
         if (!g.session_up && pia_conn_connected(&g.s.link.conn))

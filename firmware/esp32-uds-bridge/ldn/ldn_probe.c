@@ -34,8 +34,9 @@
 #define printf ldn_wire_printf
 static esp_netif_t *s_station_netif;
 
-#if !CONFIG_IDF_TARGET_ESP32 && !CONFIG_IDF_TARGET_ESP32C3 && !CONFIG_IDF_TARGET_ESP32C6 && !CONFIG_IDF_TARGET_ESP32S3
-#error "This firmware runs on the ESP32, ESP32-C3, ESP32-C6 and ESP32-S3"
+#if !CONFIG_IDF_TARGET_ESP32 && !CONFIG_IDF_TARGET_ESP32C3 && !CONFIG_IDF_TARGET_ESP32C5 && \
+    !CONFIG_IDF_TARGET_ESP32C6 && !CONFIG_IDF_TARGET_ESP32S3
+#error "This firmware runs on the ESP32, ESP32-C3, ESP32-C5, ESP32-C6 and ESP32-S3"
 #endif
 
 #include "ldn_private_wifi.h"
@@ -727,10 +728,20 @@ void ldn_app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 #if CONFIG_LDN_PROBE_LEGACY_PHY
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+    /* Dual-band chips start in 2.4+5 GHz mode, which rejects esp_wifi_set_protocol. */
+    wifi_protocols_t protocols = { .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G, .ghz_5g = WIFI_PROTOCOL_11A };
+    ESP_ERROR_CHECK(esp_wifi_set_protocols(WIFI_IF_STA, &protocols));
+#else
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G));
+#endif
 #endif
     install_wpa_hook();
     ESP_ERROR_CHECK(esp_wifi_start());
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+    /* LDN is 2.4 GHz only; also keeps scans off the 5 GHz channels. */
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY));
+#endif
     bridge_wifi_tx_power();
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     enable_management_sniffer();

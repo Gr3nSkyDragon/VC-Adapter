@@ -196,12 +196,13 @@ int pia_encrypt(const pia_crypto_t *c, const uint8_t *body, size_t body_len, con
 
 static ZSTD_DCtx *s_dctx;
 
-/* The context needs 38,464 contiguous bytes with this zstd build. The heap fragments at
-   start-up; without a context every compressed Switch datagram is undecodable and the
-   room looks silent. Static where the chip's data region allows, else allocated from
-   the heap at the start of boot. */
+/* The context needs about 30 KB plus the literal buffer, contiguous, with this zstd build
+   (38,464 bytes with the default 8 KB buffer). The heap fragments at start-up; without a
+   context every compressed Switch datagram is undecodable and the room looks silent.
+   Static where the chip's data region allows, else allocated from the heap at the start
+   of boot. */
 #if CONFIG_PIA_STATIC_ZSTD_CONTEXT
-static uint64_t s_dctx_space[40960 / sizeof(uint64_t)];
+static uint64_t s_dctx_space[(32768 + CONFIG_PIA_ZSTD_LITERAL_BUFFER) / sizeof(uint64_t)];
 #endif
 
 size_t pia_crypto_dctx_size(void) { return ZSTD_estimateDCtxSize(); }

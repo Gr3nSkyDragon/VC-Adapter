@@ -27,6 +27,8 @@
    stalls between frames. While the child is quiet only INFLIGHT_MAX applies. */
 #define CREDIT_CAP 6
 #define CHILD_QUIET_MS 250
+/* A gap in a station's stream is given up after this long: its frame is not coming. */
+#define GAP_GIVE_UP_MS 300
 
 
 /* Per-console value in the host's station record; the same in every captured session. */
@@ -571,8 +573,10 @@ static void deliver_child_wt(pia_host_t *h, pia_host_station_t *s, const uint8_t
 {
     if (len < 12) return;
     note_child_stamp(s, bin_u32(p + 4));
-    /* Length at byte 8 from a Switch, byte 9 from our joiner as the first client. */
-    size_t n = p[8] ? (size_t)(p[8] & 0x7f) : p[9];
+    /* The send header (bytes 8-11) holds a child's length at bit 8 + 5 × its slot. Our
+       joiner as a later client also puts it in byte 8, where a host's frames carry theirs. */
+    size_t n = (bin_u32(p + 8) >> (8 + 5 * s->client_slot)) & 0x1f;
+    if (n == 0) n = p[8] & 0x7f;
     if (n > len - 12) n = len - 12;
     ++s->child_frames;
     if (n > 0 && h->deliver) h->deliver(p + 12, n, slot_of(h, s), h->user);
@@ -598,8 +602,58 @@ static void feed(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t 
     else if (p[1] == 0x4b && len >= 16) take_wk(h, s, bin_u32(p + 12));
 }
 
+static int held_count(const pia_host_station_t *s)
+{
+    int held = 0;
+    for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i) held += s->hold[i].used;
+    return held;
+}
+
+/* Held frames that follow on from `next`, in order. Returns the new next. */
+static uint16_t release_held(pia_host_t *h, pia_host_station_t *s, uint16_t next)
+{
+    for (bool again = true; again;)
+    {
+        again = false;
+        for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
+            if (s->hold[i].used && s->hold[i].seq == next)
+            {
+                s->hold[i].used = false;
+                feed(h, s, s->hold[i].data, s->hold[i].length);
+                next = (uint16_t)(next + 1);
+                again = true;
+                break;
+            }
+    }
+    return next;
+}
+
+/* The frames missing before the first held one are given up: acknowledged as if they had
+   arrived, so the station's window moves on, and the held frames after them delivered. */
+static void give_up_gap(pia_host_t *h, pia_host_station_t *s)
+{
+    int lowest = -1;
+    for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
+        if (s->hold[i].used && (lowest < 0 || bin_less(s->hold[i].seq, (uint16_t)lowest))) lowest = s->hold[i].seq;
+    if (lowest < 0 || s->next_deliver < 0) return;
+    const uint16_t from = (uint16_t)s->next_deliver, to = (uint16_t)lowest;
+    for (uint16_t q = from; q != to; ++q) pia_reliable_receive(&s->reliable, q, q);
+    char line[96];
+    if ((uint16_t)(to - from) == 1)
+        snprintf(line, sizeof(line), "Switch %u did not resend frame %04x: going on without it", s->index, from);
+    else
+        snprintf(line, sizeof(line), "Switch %u did not resend frames %04x-%04x: going on without them", s->index, from,
+                 (uint16_t)(to - 1));
+    emit(h, line);
+    ++s->gaps_given_up;
+    s->next_deliver = release_held(h, s, to);
+    s->gap_since_ms = h->now_ms;
+}
+
 /* Pia retransmits out of order, but the games need their +1 mod 8 sequence, so child
-   frames are delivered in order. A frame with no room to wait is left unacked and resent. */
+   frames are delivered in order. A Switch station does not resend a frame lost on the way
+   here (its window stays at the frame while newer ones keep coming), so a gap is waited for
+   only briefly, and not at all once the hold is full. */
 static void resequence(pia_host_t *h, pia_host_station_t *s, uint16_t seq, uint16_t low, const uint8_t *inner, size_t len)
 {
     if (s->next_deliver < 0) s->next_deliver = low;
@@ -608,21 +662,8 @@ static void resequence(pia_host_t *h, pia_host_station_t *s, uint16_t seq, uint1
     {
         pia_reliable_receive(&s->reliable, seq, low);
         feed(h, s, inner, len);
-        next = (uint16_t)(next + 1);
-        for (bool again = true; again;)
-        {
-            again = false;
-            for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
-                if (s->hold[i].used && s->hold[i].seq == next)
-                {
-                    s->hold[i].used = false;
-                    feed(h, s, s->hold[i].data, s->hold[i].length);
-                    next = (uint16_t)(next + 1);
-                    again = true;
-                    break;
-                }
-        }
-        s->next_deliver = next;
+        s->next_deliver = release_held(h, s, (uint16_t)(next + 1));
+        s->gap_since_ms = h->now_ms;
         return;
     }
     if (!bin_less(next, seq) || (uint16_t)(seq - next) >= 4096)
@@ -633,6 +674,14 @@ static void resequence(pia_host_t *h, pia_host_station_t *s, uint16_t seq, uint1
     if (len > PIA_HOST_HOLD_BYTES) { ++s->hold_dropped; return; }
     for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
         if (s->hold[i].used && s->hold[i].seq == seq) return;
+    const int held = held_count(s);
+    if (held == PIA_HOST_HOLD_SLOTS)
+    {
+        give_up_gap(h, s);
+        resequence(h, s, seq, low, inner, len);
+        return;
+    }
+    if (held == 0) s->gap_since_ms = h->now_ms;
     for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
         if (!s->hold[i].used)
         {
@@ -643,7 +692,11 @@ static void resequence(pia_host_t *h, pia_host_station_t *s, uint16_t seq, uint1
             pia_reliable_receive(&s->reliable, seq, low);
             return;
         }
-    ++s->hold_dropped;
+}
+
+static void check_gap(pia_host_t *h, pia_host_station_t *s)
+{
+    if (s->next_deliver >= 0 && h->now_ms - s->gap_since_ms >= GAP_GIVE_UP_MS && held_count(s) > 0) give_up_gap(h, s);
 }
 
 static void on_reliable(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
@@ -771,7 +824,7 @@ void pia_host_receive(pia_host_t *h, const uint8_t *data, size_t length, const c
         if (s->state == 0) return;
     }
     ++s->received;
-    if (s->credits < CREDIT_CAP) ++s->credits;
+    if (s->credits < h->credit_cap) ++s->credits;
     s->last_child_datagram_ms = h->now_ms;
 }
 
@@ -934,6 +987,8 @@ static void clear_station(pia_host_t *h, pia_host_station_t *s)
     s->join_replies = 0;
     s->wg_pending = -1;
     s->next_deliver = -1;
+    s->gap_since_ms = 0;
+    s->gaps_given_up = 0;
     s->wt_ring_head = 0;
     s->teardown = s->teardown_sent = 0;
     s->silent_noted = 0;
@@ -1083,6 +1138,8 @@ void pia_host_tick(pia_host_t *h, int64_t now_ms)
     }
     for (int i = 0; i < PIA_HOST_STATIONS; ++i)
         if (h->st[i].state != 0) station_tick(h, &h->st[i]);
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+        if (h->st[i].state == 3) check_gap(h, &h->st[i]);
 }
 
 /* ---- the bridge's side ----------------------------------------------------- */
@@ -1102,6 +1159,7 @@ void pia_host_init(pia_host_t *h, const uint8_t ssid[16], const uint8_t our_mac[
     h->timestamp = 1;
     h->adapter_id = 1;
     h->net_seq = 1;
+    h->credit_cap = CREDIT_CAP;
     for (int i = 0; i < PIA_HOST_STATIONS; ++i) clear_station(h, &h->st[i]);
 }
 

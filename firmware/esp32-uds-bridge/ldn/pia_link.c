@@ -533,6 +533,7 @@ void pia_link_tick(pia_link_t *l)
         }
         /* Before WC the host still expects its stream acked. */
         count = pia_reliable_retransmit(&l->reliable, now, 2, frames, 16);
+        l->resends += count;
         uint8_t ack[20];
         if (l->tick - l->last_ack >= 2 && (l->ack_owed || pia_reliable_has_gap(&l->reliable)))
         {
@@ -547,6 +548,7 @@ void pia_link_tick(pia_link_t *l)
     }
 
     count = pia_reliable_retransmit(&l->reliable, now, l->accepted ? 1 : 2, frames, 16);
+    l->resends += count;
 
     for (int i = 0; i < l->k_inflight_count;)
     {

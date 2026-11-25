@@ -59,7 +59,7 @@ typedef struct
 
     bool accepted, host_disconnected, connect_wanted;
     uint8_t client_slot;   /* from the host's WA for this station; 0 is the first client */
-    int received, decrypt_failures, sent, reordered, hold_dropped;
+    int received, decrypt_failures, sent, reordered, hold_dropped, resends;
     int rx_seen, rx_wrong_source, rx_short, rx_bad_frame, rx_messages, rx_unzip_fail;
     int rx_body_max, rx_msgs_max;                  /* per-datagram maxima */
     int rx_unzip_last_error, rx_unzip_last_len;   /* last unzip error code, wire size */

@@ -15,7 +15,7 @@ bool ldn_control_connected(void);
 int64_t ldn_control_console_age_ms(void);
 void ldn_control_mac(uint8_t out[6]);
 /* Firmware version reported by LDN_INFO. */
-#define BRIDGE_VERSION "2.1.5"
+#define BRIDGE_VERSION "2.2.4"
 /* Apply a baud rate requested by LDN_BAUD. Call after the reply is sent. */
 void ldn_control_apply_baud(void);
 /* Flush adapter and console output before a restart. */
