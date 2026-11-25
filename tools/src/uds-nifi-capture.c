@@ -491,6 +491,413 @@ static void _noteBeacon(const uint8_t* f, size_t length, uint8_t channel) {
 	}
 }
 
+// The board as a DS host (--host) ------------------------------------------------------------------------------------------------
+//
+// An experiment: can the board host a retail DS? The frames come from a capture of a real host (--host FILE.pcap): its beacon,
+// its authentication and association responses, a CMD's body and the ACK's count. The board sends the beacons and polls; this
+// answers the DS's authentication and association, starts the polling once it has associated and stops it when it leaves.
+// What it measures: whether the DS replies to the board's CMDs, and where the board's ACK lands. With --ack-delay a,b,c and
+// --step-secs N it moves the ACK through those delays.
+
+#define MAX_TEMPLATE 512
+#define MAX_STEPS 16
+
+struct HostStep {
+	uint16_t ackDelay;
+	unsigned cmds, replied, acks, failed, cmdNoDone, ackNoDone, txFailed;
+	unsigned heard, heardEmpty, changed; // the DS's replies as captured (whenever they came), empty ones, and changes of contents
+	uint8_t last[64];
+	size_t lastLength;
+	struct Samples replyAfterCmdDone; // the reply's capture callback, after the CMD's transmit-done
+	struct Samples ackQueuedAfterCmdDone; // when the ACK was handed to the driver, after the CMD's transmit-done
+	struct Samples ackDoneAfterCmdDone; // the ACK's transmit-done, after the CMD's
+	struct Samples ackDoneAfterQueued; // the ACK's transmit-done, after it was handed to the driver
+};
+
+static struct {
+	bool on;
+	struct UDSEsp32* esp;
+	uint8_t mac[6], bssid[6];
+	uint8_t channel;
+	uint8_t beacon[MAX_TEMPLATE], auth[MAX_TEMPLATE], assoc[MAX_TEMPLATE], cmd[MAX_TEMPLATE];
+	size_t beaconLength, authLength, assocLength, cmdLength; // cmd: the CMD's body after its reply time and client mask
+	uint16_t beaconTu;
+	struct UDSEsp32NifiPoll poll;
+	uint16_t delays[MAX_STEPS];
+	unsigned delayCount, stepSecs, step;
+	uint32_t stepStartMs;
+	struct HostStep steps[MAX_STEPS];
+	bool polling;
+	uint8_t client[6];
+	uint16_t seq;
+	unsigned authRequests, assocRequests, leaves, sessions;
+	uint32_t lastCmdDone;
+	bool haveCmdDone;
+	bool hostAnswered, pollAnswered;
+	int32_t hostStatus, pollStatus;
+} sHost;
+
+static bool _parseMac(const char* text, uint8_t out[6]) {
+	unsigned v[6];
+	if (sscanf(text, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+		return false;
+	}
+	unsigned i;
+	for (i = 0; i < 6; ++i) {
+		if (v[i] > 255) {
+			return false;
+		}
+		out[i] = (uint8_t) v[i];
+	}
+	return true;
+}
+
+// One MPDU of a radiotap pcap: the frame without its FCS and the channel (0 when the record does not say).
+struct TemplateFrame {
+	const uint8_t* f;
+	size_t length;
+	uint8_t channel;
+};
+
+// Walks a radiotap pcap (as this tool writes them: TSFT, Flags, Rate, Channel, ...). Returns the frames, or NULL.
+static struct TemplateFrame* _readPcap(const char* path, uint8_t** data, size_t* count) {
+	FILE* file = fopen(path, "rb");
+	if (!file) {
+		return NULL;
+	}
+	fseek(file, 0, SEEK_END);
+	long size = ftell(file);
+	fseek(file, 0, SEEK_SET);
+	*data = size > 24 ? malloc((size_t) size) : NULL;
+	if (!*data || fread(*data, 1, (size_t) size, file) != (size_t) size) {
+		fclose(file);
+		free(*data);
+		return NULL;
+	}
+	fclose(file);
+	const uint8_t* d = *data;
+	if (d[0] != 0xD4 || d[1] != 0xC3 || d[2] != 0xB2 || d[3] != 0xA1 || (d[20] | (d[21] << 8)) != 127) {
+		return NULL; // little-endian microsecond pcap with radiotap only
+	}
+	size_t capacity = 1024, n = 0, offset = 24;
+	struct TemplateFrame* frames = malloc(sizeof(*frames) * capacity);
+	while (frames && offset + 16 <= (size_t) size) {
+		const size_t incl = d[offset + 8] | (d[offset + 9] << 8) | ((size_t) d[offset + 10] << 16) | ((size_t) d[offset + 11] << 24);
+		const uint8_t* r = d + offset + 16;
+		offset += 16 + incl;
+		if (offset > (size_t) size || incl < 8) {
+			break;
+		}
+		const size_t rtLength = r[2] | (r[3] << 8);
+		const uint32_t present = r[4] | (r[5] << 8) | ((uint32_t) r[6] << 16) | ((uint32_t) r[7] << 24);
+		if (rtLength > incl || (present & 0x80000000u)) {
+			continue;
+		}
+		size_t at = 8;
+		uint8_t flags = 0;
+		unsigned freq = 0;
+		if (present & 1) {
+			at = (at + 7) & ~(size_t) 7;
+			at += 8;
+		}
+		if (present & 2) {
+			flags = r[at++];
+		}
+		if (present & 4) {
+			++at;
+		}
+		if (present & 8) {
+			at = (at + 1) & ~(size_t) 1;
+			freq = r[at] | (r[at + 1] << 8);
+		}
+		size_t length = incl - rtLength;
+		if ((flags & 0x10) && length >= 4) {
+			length -= 4;
+		}
+		if (n == capacity) {
+			capacity *= 2;
+			struct TemplateFrame* grown = realloc(frames, sizeof(*frames) * capacity);
+			if (!grown) {
+				break;
+			}
+			frames = grown;
+		}
+		frames[n].f = r + rtLength;
+		frames[n].length = length;
+		frames[n].channel = (uint8_t) (freq == 2484 ? 14 : freq >= 2412 && freq <= 2472 ? (freq - 2407) / 5 : 0);
+		++n;
+	}
+	*count = n;
+	return frames;
+}
+
+static void _setAddresses(uint8_t* f, const uint8_t* a1, const uint8_t* a2, const uint8_t* a3) {
+	if (a1) {
+		memcpy(f + 4, a1, 6);
+	}
+	memcpy(f + 10, a2, 6);
+	memcpy(f + 16, a3, 6);
+}
+
+// The host's frames from a capture. `bssid` NULL: the host that sent the most CMDs.
+static bool _hostLoad(const char* path, const uint8_t* bssid) {
+	uint8_t* data = NULL;
+	size_t count = 0, i;
+	struct TemplateFrame* frames = _readPcap(path, &data, &count);
+	if (!frames) {
+		fprintf(stderr, "%s: not a radiotap pcap this tool can read\n", path);
+		free(data);
+		return false;
+	}
+	if (bssid) {
+		memcpy(sHost.bssid, bssid, 6);
+	} else {
+		// The most frequent CMD sender.
+		uint8_t seen[8][6];
+		unsigned counts[8] = {0}, kinds = 0, k, best = 0;
+		for (i = 0; i < count; ++i) {
+			const uint8_t* f = frames[i].f;
+			if (frames[i].length < 28 || ((f[0] >> 2) & 3) != 2 || !_macEqual(f + 4, kMpCmd)) {
+				continue;
+			}
+			for (k = 0; k < kinds && !_macEqual(seen[k], f + 10); ++k) {
+			}
+			if (k == kinds && kinds < 8) {
+				memcpy(seen[kinds++], f + 10, 6);
+			}
+			if (k < kinds) {
+				++counts[k];
+			}
+		}
+		for (k = 1; k < kinds; ++k) {
+			if (counts[k] > counts[best]) {
+				best = k;
+			}
+		}
+		if (!kinds) {
+			fprintf(stderr, "%s has no CMDs: capture a session first, or give --bssid\n", path);
+			free(frames);
+			free(data);
+			return false;
+		}
+		memcpy(sHost.bssid, seen[best], 6);
+	}
+	// The CMD length most used, to take its body from.
+	size_t lengths[8] = {0};
+	unsigned lengthCounts[8] = {0}, lengthKinds = 0, k, bestLength = 0;
+	for (i = 0; i < count; ++i) {
+		const uint8_t* f = frames[i].f;
+		const size_t n = frames[i].length;
+		if (n < 24) {
+			continue;
+		}
+		const int type = (f[0] >> 2) & 3, subtype = (f[0] >> 4) & 15;
+		if (type == 0 && subtype == 8 && _macEqual(f + 16, sHost.bssid) && n <= MAX_TEMPLATE && n >= 36) {
+			memcpy(sHost.beacon, f, n); // the last one
+			sHost.beaconLength = n;
+			sHost.beaconTu = (uint16_t) (f[32] | (f[33] << 8));
+			if (frames[i].channel) {
+				sHost.channel = frames[i].channel;
+			}
+		} else if (type == 0 && subtype == 11 && _macEqual(f + 10, sHost.bssid) && !sHost.authLength && n <= MAX_TEMPLATE) {
+			memcpy(sHost.auth, f, n);
+			sHost.authLength = n;
+		} else if (type == 0 && subtype == 1 && _macEqual(f + 10, sHost.bssid) && !sHost.assocLength && n <= MAX_TEMPLATE) {
+			memcpy(sHost.assoc, f, n);
+			sHost.assocLength = n;
+		} else if (type == 2 && _macEqual(f + 4, kMpCmd) && _macEqual(f + 10, sHost.bssid) && n >= 28) {
+			for (k = 0; k < lengthKinds && lengths[k] != n; ++k) {
+			}
+			if (k == lengthKinds && lengthKinds < 8) {
+				lengths[lengthKinds++] = n;
+			}
+			if (k < lengthKinds) {
+				++lengthCounts[k];
+			}
+		} else if (type == 2 && _macEqual(f + 4, kMpAck) && _macEqual(f + 10, sHost.bssid) && n >= 26 && !sHost.poll.ackCount) {
+			sHost.poll.ackCount = (uint16_t) (f[24] | (f[25] << 8));
+		}
+	}
+	for (k = 1; k < lengthKinds; ++k) {
+		if (lengthCounts[k] > lengthCounts[bestLength]) {
+			bestLength = k;
+		}
+	}
+	for (i = 0; lengthKinds && i < count; ++i) {
+		const uint8_t* f = frames[i].f;
+		if (frames[i].length == lengths[bestLength] && ((f[0] >> 2) & 3) == 2 && _macEqual(f + 4, kMpCmd) &&
+		    _macEqual(f + 10, sHost.bssid) && frames[i].length - 28 <= MAX_TEMPLATE) {
+			sHost.poll.duration = (uint16_t) (f[2] | (f[3] << 8));
+			sHost.poll.replyTimeUs = (uint16_t) (f[24] | (f[25] << 8));
+			sHost.poll.clientMask = (uint16_t) (f[26] | (f[27] << 8));
+			sHost.cmdLength = frames[i].length - 28;
+			memcpy(sHost.cmd, f + 28, sHost.cmdLength);
+			break;
+		}
+	}
+	free(frames);
+	free(data);
+	if (!sHost.beaconLength || !sHost.authLength || !sHost.assocLength || !sHost.poll.replyTimeUs) {
+		fprintf(stderr, "%s lacks the host %s's %s%s%s%s\n", path, _macText(sHost.bssid), sHost.beaconLength ? "" : "beacon ",
+		        sHost.authLength ? "" : "authentication response ", sHost.assocLength ? "" : "association response ",
+		        sHost.poll.replyTimeUs ? "" : "CMD");
+		return false;
+	}
+	if (sHost.assocLength >= 30) {
+		// The association response's AID is the client the CMDs poll.
+		const unsigned aid = (sHost.assoc[28] | (sHost.assoc[29] << 8)) & 0x3FFF;
+		if (aid && aid < 16) {
+			sHost.poll.clientMask = (uint16_t) (1u << aid);
+		}
+	}
+	if (!sHost.poll.ackCount) {
+		sHost.poll.ackCount = 0x0580;
+	}
+	return true;
+}
+
+static void _hostApplyPoll(bool on) {
+	struct UDSEsp32NifiPoll p = sHost.poll;
+	if (!on) {
+		p.intervalUs = 0;
+	}
+	p.ackDelayUs = sHost.delays[sHost.step];
+	sHost.steps[sHost.step].ackDelay = p.ackDelayUs;
+	sHost.pollAnswered = false;
+	udsEsp32NifiPoll(sHost.esp, &p, sHost.cmd, sHost.cmdLength);
+}
+
+static uint32_t sPollInterval = 16715;
+
+static void _hostStartPolling(void) {
+	if (sHost.polling) {
+		return;
+	}
+	sHost.polling = true;
+	// --step-secs 0 (the default): the next ACK delay with each new session, as a session lasts only seconds when the
+	// game gets no answer from the host's side.
+	if (!sHost.stepSecs && sHost.sessions++ && sHost.delayCount > 1) {
+		sHost.step = (sHost.step + 1) % sHost.delayCount;
+	}
+	sHost.poll.intervalUs = sPollInterval;
+	sHost.stepStartMs = _nowMs();
+	sHost.haveCmdDone = false;
+	_hostApplyPoll(true);
+	printf("  polling %s every %u us, ACK %s %u us after the CMD's transmit-done\n", _macText(sHost.client), sPollInterval,
+	       (sHost.poll.ackMode & 0x7F) == UDS_ESP32_NIFI_ACK_NONE    ? "(none)"
+	       : (sHost.poll.ackMode & 0x7F) == UDS_ESP32_NIFI_ACK_REPLY ? "on a reply, or"
+	                                                        : "at",
+	       sHost.delays[sHost.step]);
+}
+
+static void _hostStopPolling(const char* why) {
+	if (!sHost.polling) {
+		return;
+	}
+	sHost.polling = false;
+	_hostApplyPoll(false);
+	printf("  polling stopped: %s\n", why);
+}
+
+// A copy of a template to the client, from the board.
+static void _hostSend(const uint8_t* templ, size_t length) {
+	uint8_t frame[MAX_TEMPLATE];
+	memcpy(frame, templ, length);
+	_setAddresses(frame, sHost.client, sHost.mac, sHost.mac);
+	const uint16_t sc = (uint16_t) ((sHost.seq++ & 0x0FFF) << 4);
+	frame[22] = (uint8_t) sc;
+	frame[23] = (uint8_t) (sc >> 8);
+	udsEsp32TxFrame(sHost.esp, 0, 4, frame, length);
+}
+
+// The DS's management frames to the board.
+static void _hostRx(const uint8_t* f, size_t length) {
+	if (length < 24 || ((f[0] >> 2) & 3) != 0 || !_macEqual(f + 4, sHost.mac)) {
+		return;
+	}
+	const int subtype = (f[0] >> 4) & 15;
+	if (subtype == 11 && length >= 30 && (f[26] | (f[27] << 8)) == 1) {
+		++sHost.authRequests;
+		memcpy(sHost.client, f + 10, 6);
+		_hostSend(sHost.auth, sHost.authLength);
+		printf("  authentication from %s: answered\n", _macText(sHost.client));
+	} else if ((subtype == 0 || subtype == 2) && _macEqual(f + 10, sHost.client)) {
+		++sHost.assocRequests;
+		_hostSend(sHost.assoc, sHost.assocLength);
+		printf("  %sassociation from %s: answered\n", subtype == 2 ? "re" : "", _macText(sHost.client));
+		_hostStartPolling();
+	} else if ((subtype == 12 || subtype == 10) && _macEqual(f + 10, sHost.client)) {
+		++sHost.leaves;
+		_hostStopPolling(subtype == 12 ? "the DS deauthenticated" : "the DS disassociated");
+	}
+}
+
+static void _onTx(void* context, const struct UDSEsp32NifiTx* tx) {
+	(void) context;
+	struct HostStep* s = &sHost.steps[sHost.step];
+	if (tx->result) {
+		++s->txFailed;
+	}
+	if (tx->kind == UDS_ESP32_NIFI_TX_CMD) {
+		++s->cmds;
+		sHost.haveCmdDone = tx->doneUs != 0;
+		sHost.lastCmdDone = tx->doneUs;
+		if (!tx->doneUs) {
+			++s->cmdNoDone;
+		} else if (tx->replyUs && (int32_t) (tx->replyUs - tx->doneUs) >= 0) {
+			_sample(&s->replyAfterCmdDone, tx->replyUs - tx->doneUs);
+		}
+		if (tx->replyUs) {
+			++s->replied;
+		}
+	} else if (tx->kind == UDS_ESP32_NIFI_TX_ACK) {
+		++s->acks;
+		if (tx->clientFail) {
+			++s->failed;
+		}
+		if (!tx->doneUs) {
+			++s->ackNoDone;
+		}
+		if (sHost.haveCmdDone && (int32_t) (tx->queuedUs - sHost.lastCmdDone) >= 0) {
+			_sample(&s->ackQueuedAfterCmdDone, tx->queuedUs - sHost.lastCmdDone);
+			if (tx->doneUs) {
+				_sample(&s->ackDoneAfterCmdDone, tx->doneUs - sHost.lastCmdDone);
+			}
+		}
+		if (tx->doneUs) {
+			_sample(&s->ackDoneAfterQueued, tx->doneUs - tx->queuedUs);
+		}
+	}
+	if (sSeen.list) {
+		printf("%10u %s seq %4u %s done %+6d us  reply %+6d us  missed %04X\n", tx->queuedUs, tx->kind == UDS_ESP32_NIFI_TX_CMD ? "CMD" : "ACK",
+		       tx->seq, tx->result ? "FAILED" : "queued", tx->doneUs ? (int) (tx->doneUs - tx->queuedUs) : 0,
+		       tx->replyUs ? (int) (tx->replyUs - tx->queuedUs) : 0, tx->clientFail);
+	}
+}
+
+static void _hostSummary(void) {
+	unsigned i;
+	printf("\n== Host ==\n");
+	printf("Host %s (from %s's frames) on channel %u, beacon every %u TU; CMD %zu B of body, reply time %u us, clients %04X, ACK count %04X\n",
+	       _macText(sHost.mac), _macText(sHost.bssid), sHost.channel, sHost.beaconTu, sHost.cmdLength + 4, sHost.poll.replyTimeUs,
+	       sHost.poll.clientMask, sHost.poll.ackCount);
+	printf("Authentications %u, associations %u, sessions ended by the DS %u\n", sHost.authRequests, sHost.assocRequests, sHost.leaves);
+	for (i = 0; i < sHost.delayCount; ++i) {
+		struct HostStep* s = &sHost.steps[i];
+		if (!s->cmds && !s->acks) {
+			continue;
+		}
+		printf("ACK delay %u us: %u CMDs; the DS replied %u times (%.1f%% of the CMDs), %u of them empty, its contents changing %u times\n",
+		       s->ackDelay, s->cmds, s->heard, s->cmds ? 100.0 * s->heard / s->cmds : 0.0, s->heardEmpty, s->changed);
+		printf("  %u replies heard before the ACK went, %u ACKs, %u reporting the client missed; no transmit-done: CMD %u, ACK %u; driver refused %u\n",
+		       s->replied, s->acks, s->failed, s->cmdNoDone, s->ackNoDone, s->txFailed);
+		_printSamples("reply heard, after CMD done", &s->replyAfterCmdDone, "us");
+		_printSamples("ACK queued, after CMD done", &s->ackQueuedAfterCmdDone, "us");
+		_printSamples("ACK done, after CMD done", &s->ackDoneAfterCmdDone, "us");
+		_printSamples("ACK done, after ACK queued", &s->ackDoneAfterQueued, "us");
+	}
+}
+
 static void _onRx(void* context, const struct UDSEsp32NifiRx* rx) {
 	(void) context;
 	++sSeen.frames;
@@ -553,6 +960,9 @@ static void _onRx(void* context, const struct UDSEsp32NifiRx* rx) {
 		++sSeen.other;
 		return;
 	}
+	if (sHost.on) {
+		_hostRx(f, length);
+	}
 	const uint8_t *a1 = f + 4, *a2 = f + 10, *a3 = f + 16;
 	const unsigned airtime = _airtimeUs(rx->rate, length + 4);
 
@@ -588,6 +998,19 @@ static void _onRx(void* context, const struct UDSEsp32NifiRx* rx) {
 		}
 	} else if (type == 2 && _macEqual(a3, kMpReply)) {
 		++sSeen.replies;
+		if (sHost.on && sHost.polling) {
+			struct HostStep* hs = &sHost.steps[sHost.step];
+			++hs->heard;
+			if (length <= 28) {
+				++hs->heardEmpty;
+			}
+			const size_t body = length - 24 < sizeof(hs->last) ? length - 24 : sizeof(hs->last);
+			if (body != hs->lastLength || memcmp(hs->last, f + 24, body)) {
+				++hs->changed;
+				memcpy(hs->last, f + 24, body);
+				hs->lastLength = body;
+			}
+		}
 		struct Client* c = _client(a2);
 		const uint32_t delay = sSeen.haveCmd ? (uint32_t) (ts - sSeen.cmdTs) : 0;
 		if (c) {
@@ -629,6 +1052,15 @@ static void _onStatus(void* context, uint8_t requestType, int32_t result) {
 	if (requestType == UDS_ESP32_CMD_NIFI_START) {
 		sSeen.startAnswered = true;
 		sSeen.startStatus = result;
+	} else if (requestType == UDS_ESP32_CMD_NIFI_HOST) {
+		sHost.hostAnswered = true;
+		sHost.hostStatus = result;
+	} else if (requestType == UDS_ESP32_CMD_NIFI_POLL) {
+		sHost.pollAnswered = true;
+		sHost.pollStatus = result;
+		if (result) {
+			fprintf(stderr, "NIFI_POLL: %s\n", udsEsp32StatusText(result));
+		}
 	}
 }
 
@@ -715,7 +1147,9 @@ static void _onSignal(int sig) {
 
 static void _usage(void) {
 	fprintf(stderr, "usage: uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--quiet MS] [--out FILE.pcap]\n"
-	                "                        [--seconds N] [--all] [--fcs-fail] [--list] [--log]\n");
+	                "                        [--seconds N] [--all] [--fcs-fail] [--list] [--log]\n"
+	                "       uds-nifi-capture --host FILE.pcap [--check] [--bssid MAC] [--mac MAC] [--channel N] [--ack fixed|reply|none]\n"
+	                "                        [--ack-delay US[,US...]] [--ack-optimistic] [--step-secs N] [--interval US] [--decoy] [--out FILE.pcap] ...\n");
 }
 
 int main(int argc, char** argv) {
@@ -725,6 +1159,11 @@ int main(int argc, char** argv) {
 	uint8_t channels[MAX_CHANNELS] = {1, 7, 13};
 	unsigned channelCount = 3, dwellMs = 1200, quietMs = 3000, seconds = 0;
 	uint8_t flags = 0;
+	const char* hostPath = NULL;
+	uint8_t bssidArg[6], macArg[6];
+	bool haveBssid = false, haveMac = false, channelGiven = false, decoy = false, check = false, optimistic = false;
+	sHost.poll.ackMode = UDS_ESP32_NIFI_ACK_FIXED;
+	sHost.stepSecs = 0;
 	int i;
 	for (i = 1; i < argc; ++i) {
 		const char* a = argv[i];
@@ -734,6 +1173,7 @@ int main(int argc, char** argv) {
 		} else if (!strcmp(a, "--channel") && more) {
 			channels[0] = (uint8_t) atoi(argv[++i]);
 			channelCount = 1;
+			channelGiven = true;
 		} else if (!strcmp(a, "--scan") && more) {
 			channelCount = 0;
 			char* list = argv[++i];
@@ -758,6 +1198,35 @@ int main(int argc, char** argv) {
 			sSeen.list = true;
 		} else if (!strcmp(a, "--log")) {
 			sSeen.log = true;
+		} else if (!strcmp(a, "--host") && more) {
+			hostPath = argv[++i];
+		} else if (!strcmp(a, "--bssid") && more && _parseMac(argv[i + 1], bssidArg)) {
+			haveBssid = true;
+			++i;
+		} else if (!strcmp(a, "--mac") && more && _parseMac(argv[i + 1], macArg)) {
+			haveMac = true;
+			++i;
+		} else if (!strcmp(a, "--ack") && more) {
+			const char* mode = argv[++i];
+			sHost.poll.ackMode = !strcmp(mode, "none") ? UDS_ESP32_NIFI_ACK_NONE : !strcmp(mode, "reply") ? UDS_ESP32_NIFI_ACK_REPLY : UDS_ESP32_NIFI_ACK_FIXED;
+		} else if (!strcmp(a, "--ack-delay") && more) {
+			char* list = argv[++i];
+			char* save = NULL;
+			char* token;
+			sHost.delayCount = 0;
+			for (token = strtok_r(list, ",", &save); token && sHost.delayCount < MAX_STEPS; token = strtok_r(NULL, ",", &save)) {
+				sHost.delays[sHost.delayCount++] = (uint16_t) atoi(token);
+			}
+		} else if (!strcmp(a, "--step-secs") && more) {
+			sHost.stepSecs = (unsigned) atoi(argv[++i]);
+		} else if (!strcmp(a, "--interval") && more) {
+			sPollInterval = (uint32_t) atoi(argv[++i]);
+		} else if (!strcmp(a, "--decoy")) {
+			decoy = true;
+		} else if (!strcmp(a, "--check")) {
+			check = true;
+		} else if (!strcmp(a, "--ack-optimistic")) {
+			optimistic = true;
 		} else {
 			_usage();
 			return 2;
@@ -774,6 +1243,36 @@ int main(int argc, char** argv) {
 		_usage();
 		return 2;
 	}
+	if (hostPath) {
+		if (!_hostLoad(hostPath, haveBssid ? bssidArg : NULL)) {
+			return 1;
+		}
+		memcpy(sHost.mac, haveMac ? macArg : sHost.bssid, 6);
+		if (!_macEqual(sHost.mac, sHost.bssid)) {
+			_setAddresses(sHost.beacon, NULL, sHost.mac, sHost.mac);
+		}
+		if (channelGiven || !sHost.channel) {
+			sHost.channel = channelGiven ? channels[0] : 13;
+		}
+		channels[0] = sHost.channel;
+		channelCount = 1;
+		if (!sHost.delayCount) {
+			sHost.delays[0] = 250;
+			sHost.delayCount = 1;
+		}
+		sHost.on = true;
+		if (optimistic && sHost.poll.ackMode != UDS_ESP32_NIFI_ACK_NONE) {
+			sHost.poll.ackMode |= UDS_ESP32_NIFI_ACK_OPTIMISTIC;
+		}
+		if (check) {
+			printf("Host %s (from the frames of %s), channel %u, beacon %zu B every %u TU, authentication response %zu B, association response %zu B%s"
+			       "CMD body %zu B after reply time %u us and clients %04X, duration %u, ACK count %04X\n",
+			       _macText(sHost.mac), _macText(sHost.bssid), sHost.channel, sHost.beaconLength, sHost.beaconTu, sHost.authLength,
+			       sHost.assocLength, "\n", sHost.cmdLength, sHost.poll.replyTimeUs, sHost.poll.clientMask, sHost.poll.duration,
+			       sHost.poll.ackCount);
+			return 0;
+		}
+	}
 	if (!outPath) {
 		time_t now = time(NULL);
 		struct tm* t = localtime(&now);
@@ -789,7 +1288,9 @@ int main(int argc, char** argv) {
 	handlers.nifiRx = _onRx;
 	handlers.status = _onStatus;
 	handlers.log = _onLog;
+	handlers.nifiTx = _onTx;
 	static struct UDSEsp32 esp; // large
+	sHost.esp = &esp;
 	if (!udsEsp32Open(&esp, portName, &handlers)) {
 		fprintf(stderr, "No board: %s\n", portName ? "that port does not open" : "none found (give --esp32 PORT)");
 		return 1;
@@ -801,6 +1302,11 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	printf("Board: firmware %u.%u, protocol %u, features %02X\n", esp.info.major, esp.info.minor, esp.info.proto, esp.info.features);
+	if (sHost.on && !udsEsp32HasNifiHost(&esp)) {
+		fprintf(stderr, "This firmware has no DS host mode (feature 0x10): flash one built with it.\n");
+		udsEsp32Close(&esp);
+		return 1;
+	}
 	if (!udsEsp32HasNifi(&esp)) {
 		fprintf(stderr, "This firmware has no NiFi capture (feature 0x08): flash one built with it.\n");
 		udsEsp32Close(&esp);
@@ -813,23 +1319,48 @@ int main(int argc, char** argv) {
 		udsEsp32Close(&esp);
 		return 1;
 	}
-	printf("Capturing into %s on channel %u%s. Ctrl+C stops.\n", outPath, channels[0],
-	       channelCount > 1 ? " (hopping until a DS beacon is heard)" : "");
+	if (sHost.on) {
+		udsEsp32NifiHost(&esp, sHost.channel, (uint8_t) (flags | (decoy ? UDS_ESP32_NIFI_HOST_DECOY : 0)), sHost.mac, sHost.beaconTu);
+		uint32_t asked = _nowMs();
+		while (!sHost.hostAnswered && _nowMs() - asked < 3000) {
+			udsEsp32Poll(&esp);
+			_sleepMs(2);
+		}
+		if (!sHost.hostAnswered || sHost.hostStatus != 0) {
+			fprintf(stderr, "NIFI_HOST: %s\n", sHost.hostAnswered ? udsEsp32StatusText(sHost.hostStatus) : "no answer");
+			fclose(sPcap);
+			udsEsp32Close(&esp);
+			return 1;
+		}
+		udsEsp32SetBeacon(&esp, sHost.beacon, sHost.beaconLength);
+		printf("Hosting as %s%s on channel %u (the frames of %s), beacon every %u TU; capturing into %s. Ctrl+C stops.\n",
+		       _macText(sHost.mac), decoy ? " (decoy hardware MAC)" : "", sHost.channel, _macText(sHost.bssid), sHost.beaconTu, outPath);
+		printf("ACK: %s%s, delay", (sHost.poll.ackMode & 0x7F) == UDS_ESP32_NIFI_ACK_NONE ? "none" : (sHost.poll.ackMode & 0x7F) == UDS_ESP32_NIFI_ACK_REPLY ? "on a reply" : "fixed",
+		       (sHost.poll.ackMode & UDS_ESP32_NIFI_ACK_OPTIMISTIC) ? ", optimistic (every client heard)" : "");
+		for (i = 0; i < (int) sHost.delayCount; ++i) {
+			printf("%s %u", i ? "," : "", sHost.delays[i]);
+		}
+		printf(" us%s. Open the room on the DS and talk to the trainer.\n",
+		       sHost.delayCount < 2 ? "" : sHost.stepSecs ? " (the next every --step-secs)" : " (the next with each session)");
+	} else {
+		printf("Capturing into %s on channel %u%s. Ctrl+C stops.\n", outPath, channels[0],
+		       channelCount > 1 ? " (hopping until a DS beacon is heard)" : "");
 
-	// A locally administered MAC that no console uses, so the board's hardware ACKs nothing the DSes send each other.
-	srand((unsigned) _wallUs());
-	uint8_t mac[6] = {0x02, 0x4E, 0x49, (uint8_t) rand(), (uint8_t) rand(), (uint8_t) rand()};
-	udsEsp32NifiStart(&esp, channels[0], flags, mac);
-	uint32_t asked = _nowMs();
-	while (!sSeen.startAnswered && _nowMs() - asked < 3000) {
-		udsEsp32Poll(&esp);
-		_sleepMs(2);
-	}
-	if (!sSeen.startAnswered || sSeen.startStatus != 0) {
-		fprintf(stderr, "NIFI_START: %s\n", sSeen.startAnswered ? udsEsp32StatusText(sSeen.startStatus) : "no answer");
-		fclose(sPcap);
-		udsEsp32Close(&esp);
-		return 1;
+		// A locally administered MAC that no console uses, so the board's hardware ACKs nothing the DSes send each other.
+		srand((unsigned) _wallUs());
+		uint8_t mac[6] = {0x02, 0x4E, 0x49, (uint8_t) rand(), (uint8_t) rand(), (uint8_t) rand()};
+		udsEsp32NifiStart(&esp, channels[0], flags, mac);
+		uint32_t asked = _nowMs();
+		while (!sSeen.startAnswered && _nowMs() - asked < 3000) {
+			udsEsp32Poll(&esp);
+			_sleepMs(2);
+		}
+		if (!sSeen.startAnswered || sSeen.startStatus != 0) {
+			fprintf(stderr, "NIFI_START: %s\n", sSeen.startAnswered ? udsEsp32StatusText(sSeen.startStatus) : "no answer");
+			fclose(sPcap);
+			udsEsp32Close(&esp);
+			return 1;
+		}
 	}
 
 	signal(SIGINT, _onSignal);
@@ -857,7 +1388,24 @@ int main(int argc, char** argv) {
 			udsEsp32SetChannel(&esp, channels[current]);
 			hopped = now;
 		}
-		if (now - lastStatus >= 2000) {
+		if (sHost.on && sHost.polling && sHost.stepSecs && sHost.delayCount > 1 && now - sHost.stepStartMs >= sHost.stepSecs * 1000u) {
+			sHost.step = (sHost.step + 1) % sHost.delayCount;
+			sHost.stepStartMs = now;
+			_hostApplyPoll(true);
+			printf("  ACK delay now %u us\n", sHost.delays[sHost.step]);
+		}
+		if (sHost.on && now - lastStatus >= 2000) {
+			const struct HostStep* st = &sHost.steps[sHost.step];
+			printf("  %5.0f s  %s  auth %u  assoc %u  CMD %u  DS replies %u (%u empty, %u changes)  ACK %u  (ACK delay %u us)\n",
+			       (now - start) / 1000.0, sHost.polling ? "polling" : "beaconing", sHost.authRequests, sHost.assocRequests, st->cmds, st->heard,
+			       st->heardEmpty, st->changed, st->acks, sHost.delays[sHost.step]);
+			fflush(stdout);
+			if (sPcap) {
+				fflush(sPcap);
+			}
+			lastStatus = now;
+		}
+		if (!sHost.on && now - lastStatus >= 2000) {
 			printf("  %5.0f s  %s %u  frames %u  beacons %u  CMD %u  reply %u  ACK %u  WEP %u  errors %u\n", (now - start) / 1000.0,
 			       sSeen.locked ? "channel" : "scanning", sSeen.locked ? sSeen.locked : channels[current], sSeen.frames, sSeen.beacons,
 			       sSeen.cmds, sSeen.replies, sSeen.acks, sSeen.protectedFrames, sSeen.errors);
@@ -872,6 +1420,11 @@ int main(int argc, char** argv) {
 		}
 		_sleepMs(1);
 	}
+	if (sHost.on) {
+		_hostStopPolling("stopping");
+		_sleepMs(20);
+		udsEsp32Poll(&esp);
+	}
 	udsEsp32Stop(&esp);
 	_sleepMs(50);
 	udsEsp32Poll(&esp);
@@ -880,6 +1433,9 @@ int main(int argc, char** argv) {
 		fclose(sPcap);
 	}
 	_summary();
+	if (sHost.on) {
+		_hostSummary();
+	}
 	printf("Board framing: %u frames decoded, %u corrupt dropped\n", esp.decoder.framesOk, esp.decoder.framesBad);
 	return 0;
 }

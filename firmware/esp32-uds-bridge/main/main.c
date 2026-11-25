@@ -25,6 +25,7 @@
 #include "gbwrap.h"
 #include "keys.h"
 #include "linkport.h"
+#include "nifi_host.h"
 #include "radio.h"
 #include "transport.h" /* ldn/: the host link, shared with the Switch side */
 #include "uds_wire.h"
@@ -229,6 +230,8 @@ static void handle_command(uds_wire_frame_t *frame)
         break; /* the radio's own STOP, below */
     case UDS_CMD_START:
     case UDS_CMD_NIFI_START:
+    case UDS_CMD_NIFI_HOST:
+    case UDS_CMD_NIFI_POLL:
     case UDS_CMD_SET_CHANNEL:
     case UDS_CMD_TX_FRAME:
     case UDS_CMD_SET_BEACON:
@@ -252,7 +255,7 @@ static void handle_command(uds_wire_frame_t *frame)
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
-        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH | UDS_HELLO_FEATURE_NIFI;
+        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH | UDS_HELLO_FEATURE_NIFI | UDS_HELLO_FEATURE_NIFI_HOST;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }
@@ -264,6 +267,13 @@ static void handle_command(uds_wire_frame_t *frame)
     case UDS_CMD_NIFI_START:
         /* {channel, flags, mac[6]}: the DS capture (nifi.h). */
         result = n == 8 ? radio_start_nifi(p[0], p + 2, p[1]) : ESP_ERR_INVALID_SIZE;
+        break;
+    case UDS_CMD_NIFI_HOST:
+        /* {channel, flags, mac[6], beacon_interval_tu:u16}: the board as a DS host (nifi_host.h). */
+        result = n == 10 ? radio_start_nifi_host(p[0], p + 2, p[1], (uint16_t)(p[8] | (p[9] << 8))) : ESP_ERR_INVALID_SIZE;
+        break;
+    case UDS_CMD_NIFI_POLL:
+        result = nifi_host_poll(p, n);
         break;
     case UDS_CMD_STOP:
         result = radio_stop();

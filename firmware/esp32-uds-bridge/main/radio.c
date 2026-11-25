@@ -3,6 +3,7 @@
 
 #include "diag.h"
 #include "nifi.h"
+#include "nifi_host.h"
 #include "esp_log.h"
 
 #include <stdlib.h>
@@ -44,6 +45,8 @@ static uint32_t s_txdone_data_reports;
 static bool s_wifi_initialized;
 static bool s_running;
 static bool s_nifi; /* NiFi mode (nifi.h): set only while the radio is stopped */
+static uint32_t s_beacon_interval_us = BEACON_INTERVAL_US;
+static wifi_phy_rate_t s_beacon_rate = WIFI_PHY_RATE_1M_L; /* the DS host mode beacons at 2 Mbps, short preamble */
 static uint8_t s_channel = 1;
 static uint8_t s_own_mac[6];
 static uint8_t s_watch_mac[6];
@@ -188,7 +191,7 @@ static void beacon_tick(void *unused)
         const uint16_t sequence_control = (uint16_t)((s_beacon_sequence++ & 0x0FFF) << 4);
         s_beacon[22] = (uint8_t)sequence_control;
         s_beacon[23] = (uint8_t)(sequence_control >> 8);
-        set_tx_rate(WIFI_PHY_RATE_1M_L);
+        set_tx_rate(s_beacon_rate);
         if (transmit_locked(s_beacon, s_beacon_length) == ESP_OK) ++s_stats.beacons_sent;
     }
     xSemaphoreGive(s_tx_lock);
@@ -201,6 +204,10 @@ static void beacon_tick(void *unused)
 static void tx_done(uint8_t ifidx, uint8_t *data, uint16_t *length, bool success)
 {
     if (ifidx != WIFI_IF_STA || !s_sink || !data || !length || *length < 24) return;
+    if (s_nifi) {
+        nifi_host_tx_done(data, *length, esp_timer_get_time()); /* the DS host mode's CMDs and ACKs */
+        return;
+    }
     const uint8_t frame_type = (data[0] >> 2) & 3;
     if (data[4] & 1) return; /* group addressed: no ACK to report */
     if (frame_type == 2 && s_txdone_data_reports >= 30) return;
@@ -215,6 +222,15 @@ static void tx_done(uint8_t ifidx, uint8_t *data, uint16_t *length, bool success
     s_sink(UDS_EVT_TXDONE, event, 3 + copy);
 }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+/* esp_wifi_80211_tx's own completion callback. tx_done above (esp_wifi_set_tx_done_cb) is not called for group-addressed frames,
+ * which the DS host mode's CMDs and ACKs are: its first run saw none, so each ACK waited out the 5 ms wait for one. */
+static void raw_tx_done(const esp_80211_tx_info_t *info)
+{
+    if (s_nifi && info && info->data) nifi_host_tx_done(info->data, 24 + (size_t)info->data_len, esp_timer_get_time());
+}
+#endif
+
 esp_err_t radio_init(uds_event_sink_t sink)
 {
     s_sink = sink;
@@ -223,7 +239,9 @@ esp_err_t radio_init(uds_event_sink_t sink)
     s_event = malloc(EVENT_BYTES);
     if (!s_tx_lock || !s_beacon || !s_event) return ESP_ERR_NO_MEM;
     const esp_timer_create_args_t timer_args = {.callback = beacon_tick, .name = "beacon"};
-    return esp_timer_create(&timer_args, &s_beacon_timer);
+    esp_err_t result = esp_timer_create(&timer_args, &s_beacon_timer);
+    if (result != ESP_OK) return result;
+    return nifi_host_init(sink);
 }
 
 static esp_err_t init_wifi_once(void)
@@ -279,7 +297,8 @@ static esp_err_t init_wifi_once(void)
     return ESP_OK;
 }
 
-static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac, bool nifi, uint8_t nifi_flags)
+static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac, bool nifi, uint8_t nifi_flags,
+                       uint32_t beacon_interval_us)
 {
     if (channel < 1 || channel > 13) return ESP_ERR_INVALID_ARG;
     if (mac[0] & 1) return ESP_ERR_INVALID_ARG; /* the hardware needs an individual address */
@@ -292,6 +311,7 @@ static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac,
         esp_wifi_stop();
         s_running = false;
     }
+    nifi_host_stop();
     memcpy(s_own_mac, mac, 6);
     s_nifi = nifi;
     if (nifi) nifi_capture_reset(mac, nifi_flags);
@@ -313,6 +333,9 @@ static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac,
 #endif
         esp_wifi_set_ps(WIFI_PS_NONE);
         esp_wifi_set_tx_done_cb(tx_done);
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+        esp_wifi_register_80211_tx_cb(raw_tx_done);
+#endif
         /* NiFi mode adds MISC (in case the DS's CF-Poll / CF-Ack data subtypes come up as that) and, on request, frames with a
          * failed FCS. */
         uint32_t mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA | WIFI_PROMIS_FILTER_MASK_CTRL;
@@ -329,7 +352,10 @@ static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac,
             s_running = true;
             set_tx_rate(WIFI_PHY_RATE_1M_L);
             esp_timer_stop(s_beacon_timer);
-            if (!nifi) esp_timer_start_periodic(s_beacon_timer, BEACON_INTERVAL_US);
+            /* NiFi capture: no beacons. The DS host mode (beacon_interval_us set): the DS's interval, 2 Mbps short preamble. */
+            s_beacon_interval_us = beacon_interval_us ? beacon_interval_us : BEACON_INTERVAL_US;
+            s_beacon_rate = nifi ? WIFI_PHY_RATE_2M_S : WIFI_PHY_RATE_1M_L;
+            if (!nifi || beacon_interval_us) esp_timer_start_periodic(s_beacon_timer, s_beacon_interval_us);
         }
     }
     xSemaphoreGive(s_tx_lock);
@@ -342,16 +368,23 @@ static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac,
 
 esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
 {
-    return start(channel, mac, decoy_hw_mac, false, 0);
+    return start(channel, mac, decoy_hw_mac, false, 0, 0);
 }
 
 esp_err_t radio_start_nifi(uint8_t channel, const uint8_t mac[6], uint8_t flags)
 {
-    return start(channel, mac, false, true, flags);
+    return start(channel, mac, false, true, flags, 0);
+}
+
+esp_err_t radio_start_nifi_host(uint8_t channel, const uint8_t mac[6], uint8_t flags, uint16_t beacon_interval_tu)
+{
+    if (!beacon_interval_tu) return ESP_ERR_INVALID_ARG;
+    return start(channel, mac, (flags & UDS_NIFI_HOST_DECOY) != 0, true, flags, (uint32_t)beacon_interval_tu * 1024);
 }
 
 esp_err_t radio_stop(void)
 {
+    nifi_host_stop();
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     esp_timer_stop(s_beacon_timer);
     s_beacon_length = 0;
@@ -380,11 +413,25 @@ esp_err_t radio_tx(const uint8_t *mpdu, size_t length, uint8_t rate500k)
     if (!s_running) return ESP_ERR_INVALID_STATE;
     if (length < 10 || length > MAX_MPDU) return ESP_ERR_INVALID_SIZE;
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    set_tx_rate(rate500k ? map_rate(rate500k) : WIFI_PHY_RATE_1M_L);
+    /* NiFi mode: 2 Mbps is the DS's, with the short preamble. */
+    set_tx_rate(s_nifi && rate500k == 4 ? WIFI_PHY_RATE_2M_S : rate500k ? map_rate(rate500k) : WIFI_PHY_RATE_1M_L);
     esp_err_t result = transmit_locked(mpdu, length);
     xSemaphoreGive(s_tx_lock);
     return result;
 }
+
+esp_err_t radio_tx_nifi(const uint8_t *mpdu, size_t length)
+{
+    if (!s_running || !s_nifi) return ESP_ERR_INVALID_STATE;
+    if (length < 10 || length > MAX_MPDU) return ESP_ERR_INVALID_SIZE;
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    set_tx_rate(WIFI_PHY_RATE_2M_S);
+    esp_err_t result = transmit_locked(mpdu, length);
+    xSemaphoreGive(s_tx_lock);
+    return result;
+}
+
+void radio_own_mac(uint8_t out[6]) { memcpy(out, s_own_mac, 6); }
 
 esp_err_t radio_set_beacon(const uint8_t *mpdu, size_t length)
 {

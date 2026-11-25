@@ -56,6 +56,9 @@ enum UDSEsp32Command {
 	UDS_ESP32_CMD_GB_PICO = 0x13,
 	// Firmware with UDS_ESP32_FEATURE_NIFI: the radio in Nintendo DS (NiFi) mode, captured frames as NIFI_RX (see udsEsp32NifiStart).
 	UDS_ESP32_CMD_NIFI_START = 0x20,
+	// Firmware with UDS_ESP32_FEATURE_NIFI_HOST: the board as a DS host, an experiment (udsEsp32NifiHost, udsEsp32NifiPoll).
+	UDS_ESP32_CMD_NIFI_HOST = 0x21,
+	UDS_ESP32_CMD_NIFI_POLL = 0x22,
 };
 
 enum UDSEsp32Event {
@@ -72,6 +75,7 @@ enum UDSEsp32Event {
 	UDS_ESP32_EVT_GB_STATS = 0x92,
 	UDS_ESP32_EVT_GB_PICO = 0x93, // a Pico frame to the Pico: the board drives the clock
 	UDS_ESP32_EVT_NIFI_RX = 0xA0,
+	UDS_ESP32_EVT_NIFI_TX = 0xA1, // a CMD or MP ACK the board sent in NIFI_POLL
 };
 
 #define UDS_ESP32_KEY_SLOT_DATA 0x2D // the 3DS UDS data key the board's wrapper needs
@@ -91,6 +95,13 @@ enum {
 enum {
 	UDS_ESP32_NIFI_START_ALL = 0x01, // every frame, not only the DS's
 	UDS_ESP32_NIFI_START_FCS_FAIL = 0x02, // also frames whose FCS failed
+	UDS_ESP32_NIFI_HOST_DECOY = 0x04, // NIFI_HOST: the radio owns a twin of the MAC, so its hardware acknowledges nothing sent to it
+	UDS_ESP32_NIFI_ACK_NONE = 0, // NIFI_POLL's ACK modes: no MP ACK
+	UDS_ESP32_NIFI_ACK_FIXED = 1, // the ACK a set delay after the CMD's transmit-done
+	UDS_ESP32_NIFI_ACK_REPLY = 2, // as soon as a reply is heard, or after the delay without one
+	UDS_ESP32_NIFI_ACK_OPTIMISTIC = 0x80, // with FIXED or REPLY: the ACK reports every client heard
+	UDS_ESP32_NIFI_TX_CMD = 1,
+	UDS_ESP32_NIFI_TX_ACK = 2,
 	UDS_ESP32_NIFI_RX_TRUNCATED = 0x01,
 	UDS_ESP32_NIFI_RX_FCS = 0x02, // the MPDU's last 4 bytes are its FCS
 	UDS_ESP32_NIFI_RX_ERROR = 0x04, // the radio reported a receive error (FCS failed)
@@ -139,6 +150,7 @@ enum {
 	UDS_ESP32_FEATURE_PICO_UART = 0x02, // a GB-Link wired to the board's UART
 	UDS_ESP32_FEATURE_NO_SWITCH = 0x04, // 2.1 on: no Switch side (the uds line; aio images from before its GBA side), so HELLO never restarts the board
 	UDS_ESP32_FEATURE_NIFI = 0x08, // NIFI_START / NIFI_RX: the Nintendo DS capture
+	UDS_ESP32_FEATURE_NIFI_HOST = 0x10, // NIFI_HOST / NIFI_POLL / NIFI_TX: the board as a DS host
 };
 
 struct UDSEsp32Info {
@@ -159,6 +171,16 @@ struct UDSEsp32Rx {
 };
 
 // A frame the board captured in NiFi mode.
+// A CMD or MP ACK the board sent while polling. Times are the board's esp_timer in us, as UDSEsp32NifiRx's callbackUs.
+struct UDSEsp32NifiTx {
+	uint8_t kind; // UDS_ESP32_NIFI_TX_CMD or _ACK
+	uint8_t result; // 0: queued; else esp_wifi_80211_tx failed
+	uint16_t seq;
+	uint32_t queuedUs, doneUs; // handed to the driver; its transmit-done callback (0: none within 3 ms)
+	uint32_t replyUs; // the capture callback of the first reply heard after the CMD (0: none before the ACK went)
+	uint16_t clientFail; // the ACK's bitmask of clients that did not reply
+};
+
 struct UDSEsp32NifiRx {
 	uint8_t channel;
 	int8_t rssi;
@@ -188,6 +210,8 @@ struct UDSEsp32Handlers {
 	void (*gbPico)(void* context, const uint8_t* frame, size_t length);
 	// Firmware with UDS_ESP32_FEATURE_NIFI, after udsEsp32NifiStart.
 	void (*nifiRx)(void* context, const struct UDSEsp32NifiRx* rx);
+	// Firmware with UDS_ESP32_FEATURE_NIFI_HOST, while udsEsp32NifiPoll polls.
+	void (*nifiTx)(void* context, const struct UDSEsp32NifiTx* tx);
 };
 
 struct Esp32Serial;
@@ -233,6 +257,20 @@ bool udsEsp32Start(struct UDSEsp32* esp, uint8_t channel, const uint8_t mac[6], 
 // `flags`: UDS_ESP32_NIFI_START_*. Stopped by udsEsp32Stop. The board answers with a Status.
 bool udsEsp32NifiStart(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, const uint8_t mac[6]);
 bool udsEsp32HasNifi(const struct UDSEsp32* esp);
+// Firmware with UDS_ESP32_FEATURE_NIFI_HOST: NiFi mode (the capture goes on) owning `mac`, sending udsEsp32SetBeacon's template every
+// `beaconTu` at 2 Mbps, short preamble (TxFrame at rate 4 is short-preamble 2 Mbps too). `flags`: UDS_ESP32_NIFI_START_* and
+// UDS_ESP32_NIFI_HOST_DECOY. The board answers with a Status.
+bool udsEsp32NifiHost(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, const uint8_t mac[6], uint16_t beaconTu);
+// The board polls: a CMD every intervalUs (body: replyTimeUs, clientMask, payload), then its MP ACK (ackCount, the missed clients)
+// as ackMode says. intervalUs 0 stops. The board answers with a Status, and reports each CMD and ACK to nifiTx.
+struct UDSEsp32NifiPoll {
+	uint32_t intervalUs;
+	uint16_t replyTimeUs, clientMask, duration;
+	uint8_t ackMode; // UDS_ESP32_NIFI_ACK_*
+	uint16_t ackDelayUs, ackCount;
+};
+bool udsEsp32NifiPoll(struct UDSEsp32* esp, const struct UDSEsp32NifiPoll* poll, const uint8_t* payload, size_t length);
+bool udsEsp32HasNifiHost(const struct UDSEsp32* esp);
 bool udsEsp32SendHello(struct UDSEsp32* esp); // one Hello; the answer arrives through udsEsp32Poll (info.valid)
 bool udsEsp32Stop(struct UDSEsp32* esp);
 bool udsEsp32SetChannel(struct UDSEsp32* esp, uint8_t channel);

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_timer.h"
+#include "nifi_host.h"
 #include "nifi_match.h"
 #include "soc/soc_caps.h"
 #include "uds_wire.h"
@@ -31,6 +32,7 @@ int nifi_capture_rx(const wifi_promiscuous_pkt_t *packet, wifi_promiscuous_pkt_t
     if (with_fcs < 10 + 4) return -1;
     const uint8_t match = nifi_match(&s_match, packet->payload, with_fcs - 4);
     if (!match) return -1;
+    if (rx->rx_state == 0) nifi_host_rx(packet->payload, with_fcs - 4, callback_us); /* the DS host mode's replies */
 
     uint8_t flags = UDS_NIFI_RX_FCS;
     if (rx->rx_state != 0) flags |= UDS_NIFI_RX_ERROR;

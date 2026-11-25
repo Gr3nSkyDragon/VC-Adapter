@@ -306,6 +306,19 @@ static void _dispatch(struct UDSEsp32* esp, const struct UDSEsp32Frame* frame) {
 			}
 		}
 		break;
+	case UDS_ESP32_EVT_NIFI_TX:
+		if (frame->length >= 18 && esp->handlers.nifiTx) {
+			struct UDSEsp32NifiTx tx;
+			tx.kind = p[0];
+			tx.result = p[1];
+			tx.seq = (uint16_t) (p[2] | (p[3] << 8));
+			tx.queuedUs = _le32(&p[4]);
+			tx.doneUs = _le32(&p[8]);
+			tx.replyUs = _le32(&p[12]);
+			tx.clientFail = (uint16_t) (p[16] | (p[17] << 8));
+			esp->handlers.nifiTx(esp->handlers.context, &tx);
+		}
+		break;
 	case UDS_ESP32_EVT_LOG:
 		++esp->logFrames;
 		if (esp->handlers.log) {
@@ -401,6 +414,47 @@ bool udsEsp32NifiStart(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, con
 
 bool udsEsp32HasNifi(const struct UDSEsp32* esp) {
 	return esp->info.valid && (esp->info.features & UDS_ESP32_FEATURE_NIFI);
+}
+
+bool udsEsp32NifiHost(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, const uint8_t mac[6], uint16_t beaconTu) {
+	uint8_t payload[10];
+	payload[0] = channel;
+	payload[1] = flags;
+	memcpy(&payload[2], mac, 6);
+	payload[8] = (uint8_t) beaconTu;
+	payload[9] = (uint8_t) (beaconTu >> 8);
+	return _send(esp, UDS_ESP32_CMD_NIFI_HOST, 0, payload, sizeof(payload));
+}
+
+bool udsEsp32NifiPoll(struct UDSEsp32* esp, const struct UDSEsp32NifiPoll* poll, const uint8_t* body, size_t length) {
+	uint8_t payload[15 + 512];
+	if (length > 512) {
+		return false;
+	}
+	const uint32_t interval = poll->intervalUs;
+	payload[0] = (uint8_t) interval;
+	payload[1] = (uint8_t) (interval >> 8);
+	payload[2] = (uint8_t) (interval >> 16);
+	payload[3] = (uint8_t) (interval >> 24);
+	payload[4] = (uint8_t) poll->replyTimeUs;
+	payload[5] = (uint8_t) (poll->replyTimeUs >> 8);
+	payload[6] = (uint8_t) poll->clientMask;
+	payload[7] = (uint8_t) (poll->clientMask >> 8);
+	payload[8] = (uint8_t) poll->duration;
+	payload[9] = (uint8_t) (poll->duration >> 8);
+	payload[10] = poll->ackMode;
+	payload[11] = (uint8_t) poll->ackDelayUs;
+	payload[12] = (uint8_t) (poll->ackDelayUs >> 8);
+	payload[13] = (uint8_t) poll->ackCount;
+	payload[14] = (uint8_t) (poll->ackCount >> 8);
+	if (length) {
+		memcpy(&payload[15], body, length);
+	}
+	return _send(esp, UDS_ESP32_CMD_NIFI_POLL, 0, payload, 15 + length);
+}
+
+bool udsEsp32HasNifiHost(const struct UDSEsp32* esp) {
+	return esp->info.valid && (esp->info.features & UDS_ESP32_FEATURE_NIFI_HOST);
 }
 
 bool udsEsp32SendHello(struct UDSEsp32* esp) {

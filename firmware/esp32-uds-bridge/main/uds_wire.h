@@ -55,6 +55,18 @@
 #define UDS_CMD_NIFI_START 0x20  /* {channel:u8, flags:u8, mac[6]} */
 #define UDS_NIFI_START_ALL 0x01     /* pass every frame, not only the DS's (NIFI_MATCH_ALL) */
 #define UDS_NIFI_START_FCS_FAIL 0x02 /* also frames whose FCS failed (NIFI_RX flag ERROR): do DS frames arrive damaged? */
+/* The board as a DS host (nifi_host.h), firmware with UDS_HELLO_FEATURE_NIFI_HOST. NIFI_HOST starts the radio as NIFI_START (the
+ * capture goes on, so the host sees the clients' frames as NIFI_RX) and sends SET_BEACON's template every beacon_interval_tu at
+ * 2 Mbps, short preamble (TX_FRAME at rate 4 is that too in this mode). NIFI_POLL then has the board send CMDs on its own schedule,
+ * each followed by its MP ACK, and report both as NIFI_TX; interval_us 0 stops it. STOP stops everything. */
+#define UDS_CMD_NIFI_HOST 0x21   /* {channel:u8, flags:u8 (NIFI_START's, and UDS_NIFI_HOST_DECOY), mac[6], beacon_interval_tu:u16} */
+#define UDS_NIFI_HOST_DECOY 0x04 /* the radio hardware owns a twin of mac, so it acknowledges nothing sent to mac */
+#define UDS_CMD_NIFI_POLL 0x22   /* {interval_us:u32, reply_time_us:u16, client_mask:u16, duration:u16, ack_mode:u8, ack_delay_us:u16,
+                                  *  ack_count:u16, payload...}: CMD body = reply_time, client_mask, payload */
+#define UDS_NIFI_ACK_NONE 0      /* no MP ACK */
+#define UDS_NIFI_ACK_FIXED 1     /* the ACK ack_delay_us after the CMD's transmit-done callback */
+#define UDS_NIFI_ACK_REPLY 2     /* as soon as a reply is heard, or ack_delay_us after the CMD's transmit-done without one */
+#define UDS_NIFI_ACK_OPTIMISTIC 0x80 /* with FIXED or REPLY: the ACK reports every client heard, whether or not its reply was */
 
 /* Device -> host. */
 #define UDS_EVT_HELLO_ACK 0x81 /* {proto:u8, fw_major:u8, fw_minor:u8, factory_mac[6]}, 1.8 on + {features:u8} */
@@ -66,6 +78,7 @@
                                           * in 3DS mode and HELLO never restarts it. Clear on the ldn and aio lines, and on every 2.0
                                           * and older image. */
 #define UDS_HELLO_FEATURE_NIFI 0x08      /* NIFI_START and NIFI_RX: the DS capture */
+#define UDS_HELLO_FEATURE_NIFI_HOST 0x10 /* NIFI_HOST, NIFI_POLL and NIFI_TX: the board as a DS host (an experiment) */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */
 #define UDS_EVT_LOG 0x84       /* {text...} */
@@ -84,6 +97,13 @@
  *   rx_timestamp:u32 LE (rx_ctrl.timestamp, us, the Wi-Fi clock), callback_us:u32 LE (esp_timer when the callback ran),
  *   sig_len:u16 LE (the length the radio reported, FCS included), mpdu... */
 #define UDS_EVT_NIFI_RX 0xA0
+/* A CMD or MP ACK the board sent in NIFI_POLL: {kind:u8 (1 CMD, 2 ACK), result:u8 (0 queued, else esp_wifi_80211_tx failed),
+ * seq:u16, queued_us:u32, done_us:u32 (its transmit-done callback, 0 none within 3 ms), reply_us:u32 (the capture callback of the
+ * first reply heard after the CMD, 0 none yet), client_fail:u16 (the ACK's bitmask)}. Times are the board's esp_timer, as NIFI_RX's
+ * callback_us. */
+#define UDS_EVT_NIFI_TX 0xA1
+#define UDS_NIFI_TX_CMD 1
+#define UDS_NIFI_TX_ACK 2
 #define UDS_NIFI_RX_TRUNCATED 0x01
 #define UDS_NIFI_RX_FCS 0x02        /* the last 4 bytes are the FCS (always, so far) */
 #define UDS_NIFI_RX_ERROR 0x04      /* rx_state != 0: FCS failed or another receive error */

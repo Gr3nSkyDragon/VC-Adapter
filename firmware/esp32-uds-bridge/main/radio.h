@@ -36,6 +36,13 @@ esp_err_t radio_init(uds_event_sink_t sink);
 esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac);
 /* NiFi mode (nifi.h): no beacon timer, captured frames go to the sink as UDS_EVT_NIFI_RX. `flags`: UDS_NIFI_START_*. */
 esp_err_t radio_start_nifi(uint8_t channel, const uint8_t mac[6], uint8_t flags);
+/* The DS host mode (nifi_host.h): NiFi mode, plus SET_BEACON's template every beacon_interval_tu. `flags`: UDS_NIFI_START_* and
+ * UDS_NIFI_HOST_DECOY. */
+esp_err_t radio_start_nifi_host(uint8_t channel, const uint8_t mac[6], uint8_t flags, uint16_t beacon_interval_tu);
+/* NiFi mode: one frame at 2 Mbps, short preamble. */
+esp_err_t radio_tx_nifi(const uint8_t *mpdu, size_t length);
+/* The MAC the radio was started with (the board's own, or the DS host's). */
+void radio_own_mac(uint8_t out[6]);
 esp_err_t radio_stop(void);
 esp_err_t radio_set_channel(uint8_t channel);
 /* rate500k: 0 = the default (1 Mbit/s), otherwise the rate in 500 kbit/s units (22 = 11 Mbit/s). */

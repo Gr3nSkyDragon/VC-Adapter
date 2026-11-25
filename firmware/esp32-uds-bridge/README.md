@@ -379,6 +379,50 @@ board hosting for melonDS and the retail DS as the client, leaves the reply to t
 schedule and the ACK about 395 us after each reply slot, and how strictly a retail client checks that ACK's time is what is to be
 found out next.
 
+### The board as a DS host (an experiment)
+
+Firmware with HELLO_ACK feature `0x10` (`UDS_HELLO_FEATURE_NIFI_HOST`) can stand in for a DS host, to find out whether a retail
+DS will be the board's client and where the board's MP ACK has to land (`main/nifi_host.h`):
+
+| Type | Payload | Reply |
+| --- | --- | --- |
+| `0x21` NIFI_HOST | `channel:u8, flags:u8 (NIFI_START's; bit 2: decoy hardware MAC), mac[6], beacon_interval_tu:u16` | STATUS. NiFi capture as NIFI_START, owning `mac`, and SET_BEACON's template every interval at 2 Mbps, short preamble (TX_FRAME at rate 4 is too) |
+| `0x22` NIFI_POLL | `interval_us:u32 (0 stops), reply_time_us:u16, client_mask:u16, duration:u16, ack_mode:u8, ack_delay_us:u16, ack_count:u16, payload...` | STATUS. A CMD every interval (its body: reply time, client mask, payload), then the MP ACK: none (0), `ack_delay_us` after the CMD's transmit-done (1), or as soon as a reply is heard, else after the delay (2); bit 7 (`UDS_NIFI_ACK_OPTIMISTIC`): the ACK reports every client heard |
+
+`0xA1` NIFI_TX, per CMD and ACK: `kind:u8 (1 CMD, 2 ACK), result:u8, seq:u16, queued_us:u32, done_us:u32, reply_us:u32,
+client_fail:u16`, in the board's `esp_timer` microseconds (as NIFI_RX's `callback_us`). The polling runs in a task on the second
+core that busy-waits to the ACK.
+
+`uds-nifi-capture --host FILE.pcap` drives it from a capture of a real session: the host's beacon, its authentication and
+association responses, a CMD's body and the ACK's count. It answers the DS's authentication and association, polls once the DS has
+associated and stops when it leaves, and sums up, per ACK delay, how many CMDs got a reply and where the ACK went:
+
+```
+uds-nifi-capture --host FILE.pcap [--check] [--bssid MAC] [--mac MAC] [--channel N] [--ack fixed|reply|none]
+                 [--ack-delay US[,US...]] [--ack-optimistic] [--step-secs N] [--interval US] [--decoy] [--out FILE.pcap] [--list]
+```
+
+`--check` prints what it took from the capture and stops. The board uses the captured host's MAC unless `--mac` gives another, so
+the DS that was the host stays off. With several `--ack-delay` values it moves to the next with each new session, or every `--step-secs` if that is given (a
+session lasts only seconds while the CMDs carry a frozen copy of the real host's game data). The board
+cannot hear its own frames; a second board running the plain capture next to it sees where the CMDs and ACKs land on the air.
+
+What the host test showed (2026-11-25, ESP32-S3: the trade capture's client DS, with the board standing in for its host):
+
+- The DS joins: it sees the room in the Union Room, authenticates and associates (both answered from the PC over USB, which is
+  fast enough), and replies to the board's CMDs in hardware. It stays at "Talking to ..." and leaves after about 4 s (reason 3),
+  as the CMDs carry one frozen copy of the real host's game data.
+- The ACK has to be queued 150 to 350 us after the CMD's transmit-done (esp_wifi_register_80211_tx_cb; esp_wifi_set_tx_done_cb
+  is not called for group-addressed frames). The DS's reply is still on the air then, and the radio holds the ACK until it ends,
+  so it lands about where a DS host's does. With data to send, the DS then replied to 91 to 93% of the CMDs (98% with a real
+  host). An ACK 5 ms late (the first run, before the callback was fixed) had it reply to every other CMD.
+- The DS obeys the ACK's missed-clients bitmask. Told its reply was missed, it sends the same reply again, at full rate; told it
+  was heard, it moves on (and here, with nothing to answer, goes quiet: empty replies, about a third of the CMDs). The board
+  cannot know in time: a 66-byte reply reaches its capture callback about 400 us after the CMD's transmit-done, after the ACK
+  has to be queued. So the ACK's bitmask is a choice, `UDS_NIFI_ACK_OPTIMISTIC` (every client heard: a reply the board really
+  missed, 2 to 8% here, is lost) or not (every client missed until a later exchange: nothing lost, every message sent twice).
+  Which one a real session gets through with is for the melonDS bridge to find out, with real game data both ways.
+
 ## Status: what has and has not been verified
 
 Verified on the development PC: the framing (C and C++ agree with an independent Python reference),
