@@ -14,11 +14,13 @@
  * picks the one it is left in: for the Switch side, the tool ends by sending what GB-Link Switch LDN's own hosts send ("LDN_"), which
  * moves the board over, and checks that its Switch side answers. Hosts move it back and forth later as before.
  *
- * The firmware comes in two builds (package-release-bin.ps1): firmware 1.8, the GB-Link build (3DS and Switch sides), for a board
- * on the PC's USB with a GB-Link, and firmware 2.0, the VC-Adapter board build (3DS and Switch sides on the console's link port), for
- * a board wired to the port (its first build, 1.9, was Game Boy only). The "Build for" choice picks the newest image of that build
- * next to this program; an image's build is read from its version (2.0-vcadapter), and an image from before the split counts as the
- * GB-Link build.
+ * The firmware comes in three lines (package-release-bin.ps1), two of them for a board on the PC's USB: 2.1-uds (the 3DS side alone,
+ * for Azahar and PokeUDS: it never restarts when a host connects) and 2.1-ldn (the 3DS side and GB-Link Switch LDN's Switch side, for
+ * mGBA-LDN; 2.0 called this line uds, 1.8 the GB-Link build); and 2.1-aio (was 1.9, the VC-Adapter board build: the 3DS side for
+ * Game Boy games, the Switch side for GBA games), for a board wired to the console's link port. The "Build for" choice picks the
+ * newest image of that line next to this program; an image's line is read from its version (2.1-uds, 2.1-ldn, 2.0-uds = ldn, 1.9-vcadapter...), and an image from before
+ * the split counts as the ldn line. This tool flashes ESP32-S3 boards only; the images for the classic ESP32, C3 and C6 (alpha) need
+ * esptool or PokeUDS.
  *
  * Windows only (Win32, no other dependencies). Build target: uds-esp32-setup.
  */
@@ -52,7 +54,8 @@ enum {
 	ID_FW_BROWSE,
 	ID_FW_INFO,
 	ID_BUILD_LABEL,
-	ID_BUILD_GBLINK,
+	ID_BUILD_UDS, // the three "Build for" buttons, in this order (CheckRadioButton)
+	ID_BUILD_LDN,
 	ID_BUILD_VCADAPTER,
 	ID_KEY_CHECK,
 	ID_KEY_EDIT,
@@ -102,22 +105,36 @@ static int _px(int value) {
 
 enum Build {
 	BUILD_UNKNOWN,
-	BUILD_GBLINK,
-	BUILD_VCADAPTER,
+	BUILD_UDS,       // 2.1-uds: the 3DS side alone
+	BUILD_LDN,       // 2.1-ldn: the 3DS and Switch sides (2.0-uds, 1.8-gblink)
+	BUILD_VCADAPTER, // 2.1-aio: the VC-Adapter board (2.0-aio, 1.9-vcadapter)
 };
 
 static const char* _buildName(enum Build build) {
-	return build == BUILD_VCADAPTER ? "VC-Adapter board build" : build == BUILD_GBLINK ? "GB-Link build" : "build not marked";
+	switch (build) {
+	case BUILD_UDS:
+		return "uds line (3DS side only)";
+	case BUILD_LDN:
+		return "ldn line (3DS and Switch sides)";
+	case BUILD_VCADAPTER:
+		return "VC-Adapter board build";
+	default:
+		return "build not marked";
+	}
 }
 
-// An image's build, from the version package-release-bin.ps1 gives it ("1.8-gblink", "2.0-vcadapter"). Unmarked: from before the
-// split, or built by hand with idf.py.
+// An image's build, from the version package-release-bin.ps1 gives it ("2.1-uds", "2.1-ldn", "2.1-aio"; "2.0-uds" and "2.0-aio";
+// before 2.0 "1.8-gblink", "1.9-vcadapter"). 2.0's uds line had both sides, so it is the ldn line. Unmarked: from before the split,
+// or built by hand with idf.py.
 static enum Build _imageBuild(const struct UDSFlashImageInfo* info) {
-	if (strstr(info->version, "-vcadapter")) {
+	if (strstr(info->version, "-aio") || strstr(info->version, "-vcadapter")) {
 		return BUILD_VCADAPTER;
 	}
-	if (strstr(info->version, "-gblink")) {
-		return BUILD_GBLINK;
+	if (strstr(info->version, "-ldn") || strstr(info->version, "-gblink")) {
+		return BUILD_LDN;
+	}
+	if (strstr(info->version, "-uds")) {
+		return !strncmp(info->version, "2.0-", 4) ? BUILD_LDN : BUILD_UDS;
 	}
 	return BUILD_UNKNOWN;
 }
@@ -486,7 +503,8 @@ static void _updateEnabled(void) {
 	EnableWindow(_item(ID_SWITCH_CHECK), !sBusy);
 	EnableWindow(_item(ID_FW_EDIT), !sBusy && flash);
 	EnableWindow(_item(ID_FW_BROWSE), !sBusy && flash);
-	EnableWindow(_item(ID_BUILD_GBLINK), !sBusy && flash);
+	EnableWindow(_item(ID_BUILD_UDS), !sBusy && flash);
+	EnableWindow(_item(ID_BUILD_LDN), !sBusy && flash);
 	EnableWindow(_item(ID_BUILD_VCADAPTER), !sBusy && flash);
 	EnableWindow(_item(ID_KEY_EDIT), !sBusy && key);
 	EnableWindow(_item(ID_KEY_BROWSE), !sBusy && key);
@@ -521,7 +539,10 @@ static void _browse(int editId, const char* filter, const char* title) {
 }
 
 static enum Build _selectedBuild(void) {
-	return IsDlgButtonChecked(sWindow, ID_BUILD_VCADAPTER) == BST_CHECKED ? BUILD_VCADAPTER : BUILD_GBLINK;
+	if (IsDlgButtonChecked(sWindow, ID_BUILD_VCADAPTER) == BST_CHECKED) {
+		return BUILD_VCADAPTER;
+	}
+	return IsDlgButtonChecked(sWindow, ID_BUILD_UDS) == BST_CHECKED ? BUILD_UDS : BUILD_LDN;
 }
 
 // An image of the other build than "Build for" says is flashed only when the user says so. An unmarked image is not asked about.
@@ -536,11 +557,12 @@ static bool _buildMatches(const char* path) {
 	if (build == BUILD_UNKNOWN || build == selected) {
 		return true;
 	}
-	char text[400];
+	char text[600];
 	snprintf(text, sizeof(text),
-	         "This image is the %s, but \"Build for\" says %s.\n\nThe GB-Link build is for a board on the PC's USB with a GB-Link; the "
-	         "VC-Adapter board build is for a board wired to the console's link port.\n\nFlash it anyway?",
-	         _buildName(build), selected == BUILD_VCADAPTER ? "VC-Adapter board" : "GB-Link");
+	         "This image is the %s, but \"Build for\" says the %s.\n\nThe uds line is for a board on the PC's USB used by Azahar or "
+	         "PokeUDS; the ldn line is for one used by mGBA-LDN (3DS and Switch); the VC-Adapter board build is for a board wired to "
+	         "the console's link port.\n\nFlash it anyway?",
+	         _buildName(build), _buildName(selected));
 	return MessageBoxA(sWindow, text, TITLE, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
 }
 
@@ -558,7 +580,7 @@ static void _start(void) {
 	if (current < 0 || (size_t) current >= sPortCount) {
 		problem = "No board is selected. Plug the board in by its native USB port and press Refresh.";
 	} else if (job->flash && !job->firmware[0]) {
-		problem = "Choose the firmware file (esp32-uds-bridge-fw<version>-esp32s3-<build>.bin).";
+		problem = "Choose the firmware file (esp32-uds-bridge-2.1-<uds, ldn or aio>-esp32s3.bin).";
 	} else if (job->key && !job->keys[0]) {
 		problem = "Choose your aes_keys.txt.";
 	} else if (job->switchKeys && !job->prodKeys[0]) {
@@ -605,14 +627,19 @@ static HWND _control(const char* cls, const char* text, DWORD style, int id, int
 	return hwnd;
 }
 
-// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them. Unmarked names:
-// 1.x from before the split (esp32-uds-bridge-fw1.7-esp32s3.bin) are GB-Link builds, 2.x (esp32-uds-bridge-fw2.0-esp32s3.bin) are
-// the VC-Adapter board's, which dropped the profile from its name; 1.9 was ...-fw1.9-esp32s3-vcadapter.bin.
+// The newest esp32-uds-bridge release image of this build next to this program, as a release folder holds them: 2.0 on
+// (esp32-uds-bridge-2.1-uds-esp32s3.bin), then the older names. 2.0's uds image had both sides, so it counts as the ldn line, and so do
+// images from before the split (esp32-uds-bridge-fw1.7-esp32s3.bin).
 static void _defaultFirmware(enum Build build, char* out, size_t capacity) {
-	static const char* const kGbLink[] = {"esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw1*-esp32s3.bin"};
-	static const char* const kVcAdapter[] = {"esp32-uds-bridge-fw2*-esp32s3.bin", "esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
-	const char* const* patterns = build == BUILD_VCADAPTER ? kVcAdapter : kGbLink;
-	size_t count = build == BUILD_VCADAPTER ? sizeof(kVcAdapter) / sizeof(kVcAdapter[0]) : sizeof(kGbLink) / sizeof(kGbLink[0]);
+	static const char* const kUds[] = {"esp32-uds-bridge-*-uds-esp32s3.bin"};
+	static const char* const kLdn[] = {"esp32-uds-bridge-*-ldn-esp32s3.bin", "esp32-uds-bridge-2.0-uds-esp32s3.bin",
+	                                   "esp32-uds-bridge-fw*-esp32s3-gblink.bin", "esp32-uds-bridge-fw*-esp32s3.bin"};
+	static const char* const kVcAdapter[] = {"esp32-uds-bridge-*-aio-esp32s3.bin", "esp32-uds-bridge-fw*-esp32s3-vcadapter.bin"};
+	static const char kOldUds[] = "esp32-uds-bridge-2.0-uds-"; // matches kUds' pattern, but is the ldn line
+	const char* const* patterns = build == BUILD_VCADAPTER ? kVcAdapter : build == BUILD_UDS ? kUds : kLdn;
+	size_t count = build == BUILD_VCADAPTER ? sizeof(kVcAdapter) / sizeof(kVcAdapter[0])
+	             : build == BUILD_UDS      ? sizeof(kUds) / sizeof(kUds[0])
+	                                       : sizeof(kLdn) / sizeof(kLdn[0]);
 	char dir[MAX_PATH];
 	DWORD length = GetModuleFileNameA(NULL, dir, sizeof(dir));
 	char* slash = length ? strrchr(dir, '\\') : NULL;
@@ -632,6 +659,9 @@ static void _defaultFirmware(enum Build build, char* out, size_t capacity) {
 			continue;
 		}
 		do {
+			if (build == BUILD_UDS && !_strnicmp(found.cFileName, kOldUds, sizeof(kOldUds) - 1)) {
+				continue;
+			}
 			if (CompareFileTime(&found.ftLastWriteTime, &newest) > 0) {
 				newest = found.ftLastWriteTime;
 				snprintf(out, capacity, "%s%s", dir, found.cFileName);
@@ -703,8 +733,9 @@ static void _create(void) {
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_FW_BROWSE, 488, 33, 100, 26);
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
 	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
-	_control("BUTTON", "GB-Link + Switch (firmware 1.8)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_GBLINK, 104, 86, 230, 22);
-	_control("BUTTON", "VC-Adapter board (firmware 2.0)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 340, 86, 240, 22);
+	_control("BUTTON", "3DS only (2.1-uds)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_UDS, 104, 86, 140, 22);
+	_control("BUTTON", "3DS + Switch (2.1-ldn)", BS_AUTORADIOBUTTON, ID_BUILD_LDN, 248, 86, 160, 22);
+	_control("BUTTON", "VC-Adapter board (2.1-aio)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 412, 86, 176, 22);
 	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
 	_control("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY_EDIT, 30, 142, 450, 24);
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_KEY_BROWSE, 488, 141, 100, 26);
@@ -724,7 +755,9 @@ static void _create(void) {
 
 	char path[MAX_PATH];
 	_loadSetting("build", path, sizeof(path));
-	CheckRadioButton(sWindow, ID_BUILD_GBLINK, ID_BUILD_VCADAPTER, !strcmp(path, "vcadapter") ? ID_BUILD_VCADAPTER : ID_BUILD_GBLINK);
+	// "gblink" (saved before 2.1) is the ldn line.
+	CheckRadioButton(sWindow, ID_BUILD_UDS, ID_BUILD_VCADAPTER,
+	                 !strcmp(path, "vcadapter") ? ID_BUILD_VCADAPTER : !strcmp(path, "uds") ? ID_BUILD_UDS : ID_BUILD_LDN);
 	_defaultFirmware(_selectedBuild(), path, sizeof(path));
 	if (!path[0]) {
 		_loadSetting("firmware", path, sizeof(path));
@@ -763,10 +796,12 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 		case ID_SWITCH_CHECK:
 			_updateEnabled();
 			break;
-		case ID_BUILD_GBLINK:
+		case ID_BUILD_UDS:
+		case ID_BUILD_LDN:
 		case ID_BUILD_VCADAPTER:
 			if (HIWORD(wParam) == BN_CLICKED) {
-				_saveSetting("build", _selectedBuild() == BUILD_VCADAPTER ? "vcadapter" : "gblink");
+				enum Build build = _selectedBuild();
+				_saveSetting("build", build == BUILD_VCADAPTER ? "vcadapter" : build == BUILD_UDS ? "uds" : "ldn");
 				_pickFirmware();
 			}
 			break;

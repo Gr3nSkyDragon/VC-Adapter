@@ -1,0 +1,11 @@
+# ESP32-C6 (alpha: builds, not yet run on hardware). Settings from GB-Link Switch LDN's firmware/ESP32-C6 (upstream, which has run on
+# a Seeed XIAO ESP32-C6).
+# One core; 160 MHz is the chip's top clock.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# The BBPLL recalibration at boot can leave USB Serial/JTAG garbled after a reset (pokeldn, docs/hardware_esp32.md).
+CONFIG_ESP_SYSTEM_BBPLL_RECALIB=n
+# The GB-Link Pico's UART: GPIO2 to its GP9, GPIO1 to its GP8 (Kconfig's defaults). The XIAO ESP32-C6's RF switch is on GPIO3 and
+# GPIO14 (main/board.c, UDS_BOARD_XIAO_C6_RF_SWITCH).

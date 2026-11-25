@@ -1,0 +1,9 @@
+# ESP32-S3: the boards this firmware was made and measured on (a Seeed XIAO ESP32-S3 among them).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# The console is the native USB port, as GB-Link Switch LDN's text console needs.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# The BBPLL recalibration at boot can leave USB Serial/JTAG garbled after a reset (pokeldn, docs/hardware_esp32.md). New in 2.0, not
+# yet measured on this firmware.
+CONFIG_ESP_SYSTEM_BBPLL_RECALIB=n
+# The GB-Link Pico's UART: GPIO2 to its GP9, GPIO1 to its GP8 (Kconfig's defaults).

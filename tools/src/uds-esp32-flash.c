@@ -110,7 +110,7 @@ bool udsFlashCheckImage(const uint8_t* image, size_t size, struct UDSFlashImageI
 	}
 	if (size < PARTITION_TABLE + 32 || image[PARTITION_TABLE] != 0xAA || image[PARTITION_TABLE + 1] != 0x50) {
 		return _why(why, whyCapacity, "this is the app on its own (as in a build folder), not a release image: use the merged "
-		                              "esp32-uds-bridge-fw<version>-esp32s3.bin, which also holds the bootloader and the partition table");
+		                              "esp32-uds-bridge-2.1-<uds, ldn or aio>-esp32s3.bin, which also holds the bootloader and the partition table");
 	}
 	static const size_t kSizes[] = {1, 2, 4, 8, 16, 32, 64, 128};
 	unsigned sizeCode = image[3] >> 4;

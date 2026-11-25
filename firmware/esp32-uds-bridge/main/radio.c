@@ -228,13 +228,18 @@ static esp_err_t init_wifi_once(void)
         return result;
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_init());
-    esp_event_loop_create_default(); /* may already exist */
+    result = esp_event_loop_create_default();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        diag_report("after the failed esp_event_loop_create_default");
+        return result;
+    }
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-    /* Raw capture and injection: more buffers than ESP-IDF's defaults, and no aggregation. The project's sdkconfig keeps the
-     * defaults, which GB-Link Switch LDN's side is built and tested with; these numbers are this side's only. */
-    config.static_rx_buf_num = 16;
-    config.dynamic_rx_buf_num = 64;
-    config.dynamic_tx_buf_num = 64;
+    /* Raw capture and injection: this side's own buffer counts, and no aggregation. The sdkconfig keeps what GB-Link Switch LDN's
+     * side is built and tested with; these numbers are this side's only, per chip (Kconfig.projbuild): 16/64/64 on the S3 (measured)
+     * and the C6, 4/16/16 on the classic ESP32 and the C3 (upstream's numbers for those chips, not yet measured with a 3DS). */
+    config.static_rx_buf_num = CONFIG_UDS_WIFI_STATIC_RX_BUFFERS;
+    config.dynamic_rx_buf_num = CONFIG_UDS_WIFI_DYNAMIC_RX_BUFFERS;
+    config.dynamic_tx_buf_num = CONFIG_UDS_WIFI_DYNAMIC_TX_BUFFERS;
     config.ampdu_rx_enable = 0;
     config.ampdu_tx_enable = 0;
     diag_report("before esp_wifi_init");
@@ -288,6 +293,11 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
     if (decoy_hw_mac) hw_mac[0] ^= 0x02; /* locally administered twin: still an individual address */
     if ((result = esp_wifi_set_mac(WIFI_IF_STA, hw_mac)) == ESP_OK &&
         (result = esp_wifi_start()) == ESP_OK) {
+#if CONFIG_BRIDGE_WIFI_MAX_TX_POWER
+        /* The Switch side's cap (ldn/Kconfig.projbuild; set on the C3, whose boards can garble frames at full power), which the
+         * driver forgets on every esp_wifi_start. 0 elsewhere: the chip's own maximum, as before. */
+        esp_wifi_set_max_tx_power(CONFIG_BRIDGE_WIFI_MAX_TX_POWER);
+#endif
         esp_wifi_set_ps(WIFI_PS_NONE);
         esp_wifi_set_tx_done_cb(tx_done);
         const wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT |

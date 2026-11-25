@@ -1,0 +1,24 @@
+# The classic ESP32 (alpha: builds, not yet run on hardware). Settings from GB-Link Switch LDN's firmware/ESP32 (upstream, which has
+# run on a DOIT ESP32 DEVKIT V1).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+# No native USB: the console is UART0 (GPIO1/3) behind the board's USB bridge (CP210x, CH340), at 921600 from boot, for both sides.
+# The boot ROM still prints its banner at 115200; the 3DS side's first byte is a frame delimiter, after which the host drops it.
+# "Custom" is what lets ESP-IDF set the rate.
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+# The GB-Link Pico's UART: GPIO17 (TX2) to its GP9, GPIO16 (RX2) to its GP8.
+CONFIG_PICO_LINK_TX_GPIO=17
+CONFIG_PICO_LINK_RX_GPIO=16
+# Static data is limited to about 124 KB on this chip: the zstd context comes from the heap at boot, with the smallest literal
+# buffer (7 KB more heap while hosting).
+CONFIG_PIA_STATIC_ZSTD_CONTEXT=n
+CONFIG_PIA_ZSTD_LITERAL_BUFFER=1024
+# Upstream's Wi-Fi buffers for this chip: four static RX buffers, dynamic ones capped. Switch networks are 802.11b/g (no
+# aggregation), and neither side uses IPv6. The 3DS side's own numbers: main/Kconfig.projbuild (UDS_WIFI_*).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_LWIP_IPV6=n

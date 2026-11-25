@@ -1,6 +1,7 @@
 # esp32-uds-bridge
 
-Firmware for an **ESP32-S3** that acts as the 802.11 radio for Azahar's local wireless (UDS) on
+Firmware for an **ESP32-S3**, an **ESP32-S2** (the 3DS side only), and, as alpha builds not yet run on hardware, the
+classic **ESP32**, **ESP32-C3** and **ESP32-C6** (see [FIRMWARE.md](FIRMWARE.md)) that acts as the 802.11 radio for Azahar's local wireless (UDS) on
 Android, in place of the USB Wi-Fi adapter and `ldnd.exe` used on Windows. The phone talks to the
 board over USB-C; the board captures and injects raw Wi-Fi frames so the emulator can trade with a
 retail 3DS.
@@ -17,21 +18,24 @@ authentication/association handshake, beacons' contents and everything else stay
 | Beacon cadence | Azahar hands over a beacon template; the board sends it every 102.4 ms with a fresh timestamp and sequence number, so USB jitter never shows up as a missing beacon. |
 | Channel | Azahar drives discovery hopping (1, 6, 11) and channel selection with `SET_CHANNEL`, exactly like the desktop monitor. |
 
-## Versions: two build profiles
+## Versions: two firmware lines
 
-One codebase, two builds (`package-release-bin.ps1`, see "Build and flash"):
+One codebase, three firmware lines (`package-release-bin.ps1`, see "Build and flash"; [FIRMWARE.md](FIRMWARE.md) has the chips
+and what is alpha). **`uds` changed meaning in 2.1**: 2.0-uds had both sides and is 2.1-ldn now.
 
-| Profile | Firmware | For | What it has |
-| --- | --- | --- | --- |
-| **1**, `gblink` | **1.8** | A board on a PC's or phone's USB: Azahar, mGBA, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks |
-| **2**, `vcadapter` | **2.0** | The VC-Adapter board, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the Switch side on the link port, running on its own: Game Boy games through the 3DS side, FireRed, LeafGreen and Emerald through the GBA Wireless Adapter emulated on the port (`rfu/`), Ruby and Sapphire through their link cable (`cable/`) |
+| Line | Was | For | What it has | Chips |
+| --- | --- | --- | --- | --- |
+| **2.1-uds** | new in 2.1 | A board on a PC's USB whose host only speaks 3DS: Azahar, PokeUDS (and mGBA's 3DS side) | The 3DS side alone: it boots in 3DS mode, so a host connecting never restarts it or drops its USB port | ESP32-S3, S2; alpha: ESP32, C3, C6 |
+| **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for mGBA-LDN, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks | ESP32-S3; alpha: ESP32, C3, C6 |
+| **2.1-aio** | 2.0-aio; 2.0 and 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the GB/GBA games, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the Switch side on the link port, running on its own: Game Boy games through the 3DS side, FireRed, LeafGreen and Emerald through the GBA Wireless Adapter emulated on the port (`rfu/`), Ruby and Sapphire through their link cable (`cable/`) | ESP32-S3 only |
 
-The profile is a set of menuconfig choices: `sdkconfig.defaults` is profile 1, `sdkconfig.defaults` + `sdkconfig.vcadapter`
-profile 2 (`CONFIG_UDS_LINK_PORT` and `CONFIG_UDS_SWITCH_LDN` on, the Switch side's GBA end on the port). The firmware reports its
-version, 1.8 or 2.0, from `CONFIG_UDS_FIRMWARE_MAJOR` and `_MINOR`, which follow the profile. 1.9 was profile 2's first build,
-Game Boy only (`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`); 2.0's image drops the profile from its name.
+The line is a set of menuconfig choices: `sdkconfig.defaults` is 2.1-ldn, `sdkconfig.defaults` + `sdkconfig.uds` 2.1-uds
+(`CONFIG_UDS_SWITCH_LDN` off), `sdkconfig.defaults` + `sdkconfig.aio` 2.1-aio (`CONFIG_UDS_LINK_PORT` and `CONFIG_UDS_SWITCH_LDN` on, the
+Switch side's GBA end on the port, and the XIAO's PSRAM); each chip's own settings are in `sdkconfig.defaults.<chip>`. Every line reports firmware 2.1 (`CONFIG_UDS_FIRMWARE_MAJOR` and
+`_MINOR`); HELLO_ACK's features tell them apart (link port `0x01`: aio; no Switch side `0x04`: uds; neither: ldn), and
+`CONFIG_UDS_FIRMWARE_LINE` names the line.
 
-## Two modes: 3DS and Switch (firmware 1.8)
+## Two modes: 3DS and Switch (2.1-ldn, since 1.8)
 
 Built with ESP-IDF 6.1 (the version GB-Link Switch LDN pins), the firmware also carries GB-Link Switch LDN's bridge
 (`ldn/`, AGPL-3.0, see its README): the board can join or host a Switch's local wireless room for a GBA game, as GB-Link's
@@ -83,9 +87,9 @@ What it draws is `main/scene.c` (layout, icons, wording) using the calls in `mai
   --size 48` for colour Pokemon sprites; it prints each picture in the terminal, and `--preview
   out.png` writes it enlarged.
 
-### GBA link port, no GB-Link (firmware 1.9 on)
+### GBA link port, no GB-Link (2.1-aio, since 1.9)
 
-The **VC-Adapter board build** (`esp32-uds-bridge-fw2.0-esp32s3.bin`; 1.9 was `...-fw1.9-esp32s3-vcadapter.bin`; `sdkconfig.vcadapter`, which turns on
+The **VC-Adapter board build** (`esp32-uds-bridge-2.1-aio-esp32s3.bin`, was `-2.0-aio-esp32s3`, `-fw1.9-esp32s3-vcadapter`; `sdkconfig.aio`, which turns on
 `CONFIG_UDS_LINK_PORT`, menuconfig's UDS bridge > **Game Boy link port wired to GPIOs**) needs no GB-Link: a GBA (playing a GB/GBC cartridge), GBC or Game Boy link port is wired to four GPIOs through a level
 shifter, and the board clocks the cartridge itself, as the GB-Link's Pico did (the board the master, the cartridge the slave;
 `main/linkport.c`). Each byte goes out in one piece at 262144 Hz (`CONFIG_UDS_LINK_PORT_CLOCK_HZ`; the Pico clocks at about
@@ -136,20 +140,25 @@ its log.
 
 ## Flashing a pre-built firmware (no ESP-IDF needed)
 
-Each release ships one file per build (bootloader, partition table and app merged):
-`esp32-uds-bridge-fw1.8-esp32s3-gblink.bin`, **firmware 1.8**, for a board on the PC's or phone's USB (Azahar, mGBA, a GB-Link
-through uds-gblink-relay; the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks), and
-`esp32-uds-bridge-fw2.0-esp32s3.bin`, **firmware 2.0**, for the VC-Adapter board on the console's link port (the 3DS side and
-the Switch side; 1.9, `esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`, was Game Boy only). Images from before 1.8
-(`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link build without the Switch side. Either file is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**: store them again
+Each release ships one file per line and chip (bootloader, partition table and app merged):
+`esp32-uds-bridge-2.1-uds-<chip>.bin`, **firmware 2.1-uds**, for a board on the PC's USB used by Azahar or PokeUDS (the 3DS side
+alone); `esp32-uds-bridge-2.1-ldn-<chip>.bin`, **firmware 2.1-ldn**, for one used by mGBA-LDN or a GB-Link through
+uds-gblink-relay (the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks); both for `esp32s3` and,
+as alpha builds not yet run on hardware, `esp32`, `esp32c3` and `esp32c6`; 2.1-uds also for `esp32s2`; and `esp32-uds-bridge-2.1-aio-esp32s3.bin`, **firmware
+2.1-aio**, for the VC-Adapter board on the console's link port (the 3DS side and the Switch side; 1.9 was Game Boy only). In 2.0 the ldn line was
+`esp32-uds-bridge-2.0-uds-<chip>.bin`; before 2.0 the images were `esp32-uds-bridge-fw1.8-esp32s3-gblink.bin` and
+`esp32-uds-bridge-fw1.9-esp32s3-vcadapter.bin`; images from before 1.8 (`esp32-uds-bridge-fw1.7-esp32s3.bin`) are the GB-Link
+build without the Switch side. The rest of this section is about the S3; the other chips' differences (the classic ESP32 has no
+native USB port and flashes through its USB bridge) are in [FIRMWARE.md](FIRMWARE.md). Either file is written at **offset `0x0`**, gaps included, so it also **erases the stored keys**: store them again
 after flashing. Plug the board in through its **native USB port** (the one that shows up as an Espressif USB Serial/JTAG
 device) and use one of these:
 
 **With uds-esp32-setup (Windows).** `uds-esp32-setup.exe` ships next to the `.bin`. It flashes the firmware and then stores the
-keys in one go (each step can be done on its own): pick **Build for** (GB-Link + Switch, firmware 1.8, or the VC-Adapter board,
-2.0; the newest `.bin` of that build beside it is filled in, and it asks before flashing an image of the other build), the 3DS
+keys in one go (each step can be done on its own): pick **Build for** (3DS only, 2.1-uds; 3DS + Switch, 2.1-ldn; or the
+VC-Adapter board, 2.1-aio; the newest `.bin` of that build beside it is filled in, and it asks before flashing an image of another
+build), the 3DS
 key from your `aes_keys.txt`, the four Switch keys from your `prod.keys` (`aes_kek_generation_source`,
-`aes_key_generation_source`, `master_key_00`, `master_key_12`) that the Switch side needs, and the board, and press Start. Only
+`aes_key_generation_source`, `master_key_00`, `master_key_12`) that the Switch side needs (2.1-ldn only), and the board, and press Start. Only
 those 16-byte keys are sent to the board (3DS slot 0x2D; the Switch keys in slots 0x80 to 0x83, which the firmware keeps where
 GB-Link Switch LDN's `ldn_keys.c` reads them), and they are never shown or logged. Firmware from before the ESP-IDF 6.1 port
 cannot keep the Switch keys, and the installer says so. It is built from this repository's `tools/` and needs nothing else
@@ -163,7 +172,7 @@ in Chrome or Edge (it needs Web Serial). Connect, pick the board's port, add the
 
 ```
 pip install esptool
-esptool --chip esp32s3 -p COM4 write_flash 0x0 esp32-uds-bridge-fw1.4-esp32s3.bin
+esptool --chip esp32s3 -p COM4 write_flash 0x0 esp32-uds-bridge-2.1-uds-esp32s3.bin
 ```
 
 (replace `COM4` with the board's port; on older esptool versions the command is `esptool.py`).
@@ -172,35 +181,41 @@ If the board is not detected, hold **BOOT** while plugging it in, then release i
 nothing after flashing; in Azahar's Network settings, **Connect** should report the firmware version.
 The merged file was verified by flashing it to a real ESP32-S3 with esptool and with esptool-js.
 
-To produce the merged files for a new release, run `package-release-bin.ps1` with ESP-IDF 6.1 set up (see below): it builds
-both profiles (`-Profile 1` or `-Profile 2` for one), each in its own `build-<profile>` folder, and writes them to the
-repository's `release/`. The build's name is also in the app's version (`2.0-vcadapter`), which uds-esp32-setup reads, and the firmware says
-it in HELLO_ACK's features byte (1.8 on).
+To produce the merged files for a new release, run `package-release-bin.ps1` (or `package-release-bin.sh`) with ESP-IDF 6.1 set
+up (see below): it builds the three lines for every chip they are made for (`-Line uds|ldn|aio` and `-Chip <chip>` for fewer), each in
+its own `build-<line>-<chip>` folder, and writes them to the repository's `release/`. The line is also in the app's version
+(`2.1-aio`), which uds-esp32-setup reads, and the firmware says it in HELLO_ACK's features byte (1.8 on; the no-Switch bit 2.1 on).
 
 ## Build and flash
 
 Releases are built with **ESP-IDF v6.1** at commit `fff9895c82d744c7237be8847347bdd1b07c6643`, the one GB-Link Switch LDN pins
-(the build checks it, and the Wi-Fi driver library's hash, whenever the Switch side is in). In PowerShell, set it up, then build
-both release images:
+(the build checks it, and each chip's Wi-Fi driver library hash, whenever the Switch side is in), installed for the four chips
+(`install.ps1 esp32,esp32c3,esp32c6,esp32s3`, or `./install.sh ...` on Linux and WSL). In PowerShell, set it up, then build
+the release images:
 
 ```
 . <ESP-IDF v6.1>\export.ps1
 cd firmware/esp32-uds-bridge
-.\package-release-bin.ps1               # both profiles into ../../release
-.\package-release-bin.ps1 -Profile 1    # firmware 1.8 only: esp32-uds-bridge-fw1.8-esp32s3-gblink.bin
-.\package-release-bin.ps1 -Profile 2    # firmware 2.0 only: esp32-uds-bridge-fw2.0-esp32s3.bin
+.\package-release-bin.ps1                        # everything into ../../release
+.\package-release-bin.ps1 -Line uds              # 2.1-uds for the four chips: esp32-uds-bridge-2.1-uds-<chip>.bin
+.\package-release-bin.ps1 -Line uds -Chip esp32c6
+.\package-release-bin.ps1 -Line ldn              # 2.1-ldn for the four chips: esp32-uds-bridge-2.1-ldn-<chip>.bin
+.\package-release-bin.ps1 -Line aio              # 2.1-aio: esp32-uds-bridge-2.1-aio-esp32s3.bin
 ```
 
-Or by hand with `idf.py`, each profile in a folder of its own:
+(`./package-release-bin.sh [uds|aio] [chip]` on Linux, macOS and WSL.) Or by hand with `idf.py`, each line and chip in a folder of
+its own; without `IDF_TARGET` the build is for the S3:
 
 ```
-idf.py -B build-gblink -D SDKCONFIG=build-gblink/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" build
-idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.vcadapter" build
-idf.py -B build-gblink -D SDKCONFIG=build-gblink/sdkconfig -p COMx flash        # COMx = the board's port on your PC
+idf.py -B build-uds-esp32s3 -D IDF_TARGET=esp32s3 -D SDKCONFIG=build-uds-esp32s3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" build
+idf.py -B build-uds-esp32c3 -D IDF_TARGET=esp32c3 -D SDKCONFIG=build-uds-esp32c3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" build
+idf.py -B build-aio-esp32s3 -D IDF_TARGET=esp32s3 -D SDKCONFIG=build-aio-esp32s3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.aio" build
+idf.py -B build-uds-esp32s3 -D SDKCONFIG=build-uds-esp32s3/sdkconfig -p COMx flash    # COMx = the board's port on your PC
 ```
 
-A folder's `sdkconfig` is made from the defaults the first time only: after changing a profile file, delete the folder (or its
-`sdkconfig`). ESP-IDF 5.2.8 still builds the 3DS side alone (no Switch side, firmware 1.8 numbering), for development.
+A folder's `sdkconfig` is made from the defaults the first time only: after changing a defaults file, delete the folder (or its
+`sdkconfig`). Before 2.0, ESP-IDF 5.2.8 built the 3DS side alone (no Switch side) for development; the multi-chip change keeps
+that path (`components/ldn_bridge/CMakeLists.txt`), but it has not been built with 5.x since.
 
 Flash over the same native USB port (hold BOOT while plugging in if the port is not detected). Nothing is printed to the port
 as text in 3DS mode: it carries the binary protocol below, and ESP-IDF's own log (Wi-Fi's included) reaches the host as LOG

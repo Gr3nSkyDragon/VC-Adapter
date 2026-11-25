@@ -207,7 +207,9 @@ bool ldn_decode_advertisement(const uint8_t *raw, size_t len, const uint8_t host
         if (size != 1280 || len != (size_t)(52 + 32 + size)) return false;
         static uint8_t plain[1312];
         pia_ctr(key, raw + 48, raw + 52, len - 52, plain);
-        uint8_t digest[32], material[1312];
+        /* VC-Adapter merge: was material[1312], 40 bytes short of the 72 + 1280 written and hashed here (a stack overrun; RISC-V
+           GCC at -O2 reports it on the C3 and C6). Still so upstream at gb-link-switch-ldn c972db4. */
+        uint8_t digest[32], material[72 + 1280];
         memcpy(material, raw + 12, 40);
         memset(material + 40, 0, 32);
         memcpy(material + 72, plain + 32, len - 52 - 32);

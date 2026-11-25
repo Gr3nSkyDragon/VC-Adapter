@@ -1,30 +1,32 @@
 ﻿/* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version.
  *
- * ESP32-S3 UDS radio bridge for Azahar on Android. The phone talks to this board over the chip's
- * native USB Serial/JTAG port with the framing in uds_wire.h; the board is a raw 802.11 radio for
+ * ESP32 UDS radio bridge for Azahar, mGBA and PokeUDS. The host talks to this board over the chip's
+ * native USB Serial/JTAG port (S3, C3, C6), or on the classic ESP32 over UART0 behind the board's
+ * USB bridge (ldn/transport.h), with the framing in uds_wire.h; the board is a raw 802.11 radio for
  * Nintendo 3DS local wireless (UDS).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/usb_serial_jtag.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "board.h"
 #include "bridge_mode.h"
 #include "diag.h"
 #include "display.h"
 #include "gbwrap.h"
 #include "keys.h"
 #include "radio.h"
+#include "transport.h" /* ldn/: the host link, shared with the Switch side */
 #include "uds_wire.h"
 
-#define FW_MAJOR CONFIG_UDS_FIRMWARE_MAJOR /* 1.8 the GB-Link build, 2.0 the VC-Adapter board build (Kconfig.projbuild) */
-#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR
+#define FW_MAJOR CONFIG_UDS_FIRMWARE_MAJOR
+#define FW_MINOR CONFIG_UDS_FIRMWARE_MINOR /* 2.1 every line, uds, ldn and aio (2.0; 1.8 and 1.9 before): Kconfig.projbuild */
 #define PROTOCOL_VERSION UDS_WIRE_VERSION
 
 /* What this build was made with, for HELLO_ACK: the VC-Adapter board profile has the link port, the GB-Link profile neither. */
@@ -33,7 +35,13 @@
 #else
 #define FEATURE_LINK_PORT 0
 #endif
-#define RX_RING_BYTES (48 * 1024)
+/* No Switch side in this image (the uds line, or any ESP-IDF 5.x build): it boots in 3DS mode and HELLO never restarts it. */
+#if !UDS_HAVE_LDN
+#define FEATURE_NO_SWITCH UDS_HELLO_FEATURE_NO_SWITCH
+#else
+#define FEATURE_NO_SWITCH 0
+#endif
+#define RX_RING_BYTES CONFIG_UDS_EVENT_RING_BYTES /* 48 KB on the S3 and C6, 16 KB on the classic and C3 */
 #define STATS_INTERVAL_US (5 * 1000 * 1000)
 /* The Switch side's "LDN_" moves the board to Switch LDN mode only while no 3DS host is talking: before the first valid frame since
  * boot, and again once valid frames have stopped for this long. Opening the port does not reset the board, so without the second case
@@ -57,8 +65,20 @@ static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *
     xSemaphoreTake(s_write_lock, portMAX_DELAY);
     size_t encoded = uds_wire_encode(type, seq, flags, payload, length, s_encoded, UDS_WIRE_MAX_ENCODED);
     size_t sent = 0;
+#if CONFIG_IDF_TARGET_ESP32S2
+    /* A partial frame needs its own delimiter before the next complete frame. */
+    static bool needs_delimiter = true;
+    const uint8_t delimiter = 0;
+    const TickType_t wait = pdMS_TO_TICKS(500);
+    if (encoded && needs_delimiter && !bridge_transport_write_wait(&delimiter, 1, wait)) {
+        radio_note_usb_dropped();
+        encoded = 0;
+    }
+#else
+    const TickType_t wait = pdMS_TO_TICKS(100);
+#endif
     while (encoded && sent < encoded) {
-        int written = usb_serial_jtag_write_bytes(s_encoded + sent, encoded - sent, pdMS_TO_TICKS(100));
+        int written = bridge_transport_write_wait(s_encoded + sent, encoded - sent, wait);
         if (written <= 0) {
             /* The host is not reading (port closed). Drop the frame; the COBS delimiter that
              * starts the next one resynchronizes the receiver. */
@@ -67,6 +87,9 @@ static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *
         }
         sent += (size_t)written;
     }
+#if CONFIG_IDF_TARGET_ESP32S2
+    if (encoded) needs_delimiter = sent < encoded;
+#endif
     xSemaphoreGive(s_write_lock);
 }
 
@@ -222,7 +245,7 @@ static void handle_command(uds_wire_frame_t *frame)
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
-        payload[9] = FEATURE_LINK_PORT;
+        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }
@@ -265,6 +288,7 @@ void ldn_app_main(void); /* ldn/ldn_probe.c: GB-Link Switch LDN's bridge; does n
 
 void app_main(void)
 {
+    board_init(); /* before Wi-Fi starts, in either mode (the XIAO C6's RF switch) */
     keys_init(); /* NVS, which also holds the boot mode */
 #if UDS_HAVE_LDN
     if (bridge_mode_get() == BRIDGE_MODE_LDN) {
@@ -281,23 +305,21 @@ void app_main(void)
     s_encoded = malloc(UDS_WIRE_MAX_ENCODED);
     s_event_item = malloc(1 + UDS_WIRE_MAX_PAYLOAD);
     uds_wire_decoder_t *decoder = malloc(sizeof(*decoder));
-    configASSERT(s_encoded && s_event_item && decoder);
+    configASSERT(s_write_lock && s_rx_ring && s_encoded && s_event_item && decoder);
 
-    usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
-    usb_config.rx_buffer_size = 16384;
-    usb_config.tx_buffer_size = 16384;
-    usb_serial_jtag_driver_install(&usb_config);
+    bridge_transport_open(CONFIG_UDS_HOST_RX_BUFFER, CONFIG_UDS_HOST_TX_BUFFER);
 
     /* The ROM boot banner and anything else that reached the port ends at a newline; a bare
      * delimiter first makes the host discard it as an idle/garbage frame. */
     const uint8_t delimiter = 0;
-    usb_serial_jtag_write_bytes(&delimiter, 1, pdMS_TO_TICKS(50));
+    bridge_transport_write_wait(&delimiter, 1, pdMS_TO_TICKS(50));
 
     /* From here ESP-IDF's log (Wi-Fi's included) reaches the host as LOG frames, never as text on the port (diag.h). */
     diag_start(queue_log);
     diag_report("boot");
 
     radio_init(event_sink);
+    diag_report("after radio_init"); /* what is left for Wi-Fi, on the smaller chips above all */
     gbwrap_init(gbwrap_send);
     display_start(display_status); /* optional: without a screen this does nothing */
 
@@ -308,7 +330,7 @@ void app_main(void)
     uint8_t chunk[256];
     int64_t last_frame_us = 0; /* when the last valid 3DS host frame came; 0: none since boot */
     for (;;) {
-        int count = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(20));
+        int count = bridge_transport_read_wait(chunk, sizeof(chunk), pdMS_TO_TICKS(20));
         if (count > 0 && (!last_frame_us || esp_timer_get_time() - last_frame_us >= MODE_WATCH_QUIET_US)) {
             bridge_mode_watch_uds(chunk, (size_t)count);
         }

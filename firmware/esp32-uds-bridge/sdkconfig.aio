@@ -1,6 +1,9 @@
-# The VC-Adapter board profile, on top of sdkconfig.defaults (the GB-Link profile): the console's link port is wired to this board
-# through a level shifter, with no GB-Link. package-release-bin.ps1 -Board vcadapter builds it; by hand:
-#   idf.py -B build-vcadapter -D SDKCONFIG=build-vcadapter/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.vcadapter" build
+# Firmware 2.0-aio (was 1.9, profile 2, "vcadapter"): the standalone VC-Adapter board for the GB/GBA games (the GBA side since 2.1), on top of
+# sdkconfig.defaults. The console's link port is wired to this board through a level shifter, with no GB-Link and no PC.
+# package-release-bin.ps1 -Line aio builds it; by hand:
+#   idf.py -B build-aio-esp32s3 -D IDF_TARGET=esp32s3 -D SDKCONFIG=build-aio-esp32s3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.aio" build
+# ESP32-S3 only: the board is S3 hardware, and its default pins clash on the other chips (UART0 on the classic ESP32's GPIO1 and 3,
+# the XIAO C6's RF switch on GPIO3). main/Kconfig.projbuild makes UDS_LINK_PORT depend on the S3.
 # The pins are the shared VC-Adapter / GB-Link pinout (Kconfig's defaults): SC D0, SI D1, SO D2, SD D3 on a XIAO ESP32-S3.
 CONFIG_UDS_LINK_PORT=y
 # The Switch side, with the GBA Wireless Adapter emulated on the link port in place of a GB-Link (CONFIG_UDS_RFU_ADAPTER, on by

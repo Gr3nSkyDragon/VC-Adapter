@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
 	const bool detects = esp.info.major > 1 || (esp.info.major == 1 && esp.info.minor >= 7);
 	_note("board firmware %u.%u, %s", esp.info.major, esp.info.minor, udsEsp32BuildText(&esp));
 	if (linkPort && !udsEsp32HasGbPort(&esp)) {
-		_note("this firmware has no link port: flash the VC-Adapter board build (esp32-uds-bridge-fw2.0-esp32s3.bin or later)");
+		_note("this firmware has no link port: flash the VC-Adapter board build (esp32-uds-bridge-2.1-aio-esp32s3.bin, 2.0-aio or 1.9 for the VC-Adapter board)");
 		udsEsp32Close(&esp);
 		return 1;
 	}

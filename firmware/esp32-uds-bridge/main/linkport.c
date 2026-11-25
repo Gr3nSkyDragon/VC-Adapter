@@ -68,6 +68,11 @@ static void sense_init(void)
     const adc_cali_curve_fitting_config_t cali_config = {
         .unit_id = ADC_UNIT_1, .chan = s_sense_channel, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
     if (adc_cali_create_scheme_curve_fitting(&cali_config, &s_cali) != ESP_OK) s_cali = NULL;
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    /* The classic ESP32 has no curve fitting: line fitting from the eFuse's calibration values (none burnt: uncalibrated, below). */
+    const adc_cali_line_fitting_config_t cali_config = {
+        .unit_id = ADC_UNIT_1, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
+    if (adc_cali_create_scheme_line_fitting(&cali_config, &s_cali) != ESP_OK) s_cali = NULL;
 #endif
     s_sense_ok = true;
 }

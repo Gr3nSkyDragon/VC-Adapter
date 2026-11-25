@@ -1,0 +1,7 @@
+# Firmware 2.1-uds: the 3DS side alone, for a board on a computer whose host only ever speaks 3DS (Azahar, PokeUDS), on top of
+# sdkconfig.defaults. It is the ldn line without GB-Link Switch LDN's Switch side: the board boots straight into 3DS mode, so the
+# first HELLO never restarts it (no USB drop, no port coming back under another name, as macOS can do), and the RAM the Switch side
+# kept is free. package-release-bin.ps1 -Line uds builds it; by hand:
+#   idf.py -B build-uds-esp32s3 -D IDF_TARGET=esp32s3 -D SDKCONFIG=build-uds-esp32s3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.uds" build
+# HELLO_ACK sets UDS_HELLO_FEATURE_NO_SWITCH (uds_wire.h), which tells it from the ldn line.
+# CONFIG_UDS_SWITCH_LDN is not set

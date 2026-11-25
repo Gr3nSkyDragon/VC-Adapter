@@ -6,3 +6,4 @@ managed_components/
 tools/screen_preview/out/
 __pycache__/
 build-*/
+dependencies.lock
