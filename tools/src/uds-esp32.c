@@ -286,6 +286,26 @@ static void _dispatch(struct UDSEsp32* esp, const struct UDSEsp32Frame* frame) {
 			}
 		}
 		break;
+	case UDS_ESP32_EVT_NIFI_RX:
+		if (frame->length >= UDS_ESP32_NIFI_RX_HEADER) {
+			++esp->rxFrames;
+			if (esp->handlers.nifiRx) {
+				struct UDSEsp32NifiRx rx;
+				rx.channel = p[0];
+				rx.rssi = (int8_t) p[1];
+				rx.rate = p[2];
+				rx.flags = p[3];
+				rx.match = p[4];
+				rx.rxState = p[5];
+				rx.rxTimestamp = _le32(&p[6]);
+				rx.callbackUs = _le32(&p[10]);
+				rx.sigLen = (uint16_t) (p[14] | (p[15] << 8));
+				rx.mpdu = &p[UDS_ESP32_NIFI_RX_HEADER];
+				rx.length = frame->length - UDS_ESP32_NIFI_RX_HEADER;
+				esp->handlers.nifiRx(esp->handlers.context, &rx);
+			}
+		}
+		break;
 	case UDS_ESP32_EVT_LOG:
 		++esp->logFrames;
 		if (esp->handlers.log) {
@@ -369,6 +389,18 @@ bool udsEsp32Start(struct UDSEsp32* esp, uint8_t channel, const uint8_t mac[6], 
 	memcpy(&payload[1], mac, 6);
 	payload[7] = decoy ? 1 : 0;
 	return _send(esp, UDS_ESP32_CMD_START, 0, payload, decoy ? 8 : 7);
+}
+
+bool udsEsp32NifiStart(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, const uint8_t mac[6]) {
+	uint8_t payload[8];
+	payload[0] = channel;
+	payload[1] = flags;
+	memcpy(&payload[2], mac, 6);
+	return _send(esp, UDS_ESP32_CMD_NIFI_START, 0, payload, sizeof(payload));
+}
+
+bool udsEsp32HasNifi(const struct UDSEsp32* esp) {
+	return esp->info.valid && (esp->info.features & UDS_ESP32_FEATURE_NIFI);
 }
 
 bool udsEsp32SendHello(struct UDSEsp32* esp) {

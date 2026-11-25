@@ -49,6 +49,12 @@
 #define UDS_GB_START_PICO 0x02
 #define UDS_GB_START_DETECT 0x04 /* 1.7 on, with PICO: the title is not used; the cartridge's first sync tells its generation */
 #define UDS_GB_START_PORT 0x08   /* 1.9 on (VC-Adapter board build): the cartridge is on this board's own link port (CONFIG_UDS_LINK_PORT), clocked as PICO */
+/* Nintendo DS local wireless (NiFi, nifi.h), firmware with UDS_HELLO_FEATURE_NIFI. NIFI_START starts the radio like START but in
+ * NiFi mode: no beacon timer, and captured frames go out as NIFI_RX (picked by nifi_match.h) instead of RX. STOP stops it. The MAC
+ * is what the hardware owns and ACKs; for a capture, a locally administered one that no console uses. */
+#define UDS_CMD_NIFI_START 0x20  /* {channel:u8, flags:u8, mac[6]} */
+#define UDS_NIFI_START_ALL 0x01     /* pass every frame, not only the DS's (NIFI_MATCH_ALL) */
+#define UDS_NIFI_START_FCS_FAIL 0x02 /* also frames whose FCS failed (NIFI_RX flag ERROR): do DS frames arrive damaged? */
 
 /* Device -> host. */
 #define UDS_EVT_HELLO_ACK 0x81 /* {proto:u8, fw_major:u8, fw_minor:u8, factory_mac[6]}, 1.8 on + {features:u8} */
@@ -59,6 +65,7 @@
 #define UDS_HELLO_FEATURE_NO_SWITCH 0x04 /* 2.1 on: no Switch side (the uds line; aio images from before its GBA side), so it boots
                                           * in 3DS mode and HELLO never restarts it. Clear on the ldn and aio lines, and on every 2.0
                                           * and older image. */
+#define UDS_HELLO_FEATURE_NIFI 0x08      /* NIFI_START and NIFI_RX: the DS capture */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */
 #define UDS_EVT_LOG 0x84       /* {text...} */
@@ -71,6 +78,17 @@
 #define UDS_EVT_GB_STATS 0x92  /* 10 x u32 LE: beacons, frames sent, frames received, dropped (decrypt, replay, other), tx failed,
                                   units sent, units received, transfers; every 5 s */
 #define UDS_EVT_GB_PICO 0x93   /* {Pico frame}: to the Pico (command: set the mode, the timing; data: the bytes to clock) */
+/* A frame captured in NiFi mode (16-byte header, then the MPDU *with* its FCS):
+ *   channel:u8, rssi:s8, rate:u8 (wifi_phy_rate_t: 0 1M, 1 2M, 2 5.5M, 3 11M long preamble; 5 2M, 6 5.5M, 7 11M short; 8..15 OFDM),
+ *   flags:u8 (UDS_NIFI_RX_*), match:u8 (nifi_match.h's NIFI_MATCH_*), rx_state:u8 (the driver's; 0 = received cleanly),
+ *   rx_timestamp:u32 LE (rx_ctrl.timestamp, us, the Wi-Fi clock), callback_us:u32 LE (esp_timer when the callback ran),
+ *   sig_len:u16 LE (the length the radio reported, FCS included), mpdu... */
+#define UDS_EVT_NIFI_RX 0xA0
+#define UDS_NIFI_RX_TRUNCATED 0x01
+#define UDS_NIFI_RX_FCS 0x02        /* the last 4 bytes are the FCS (always, so far) */
+#define UDS_NIFI_RX_ERROR 0x04      /* rx_state != 0: FCS failed or another receive error */
+#define UDS_NIFI_RX_MISC 0x08       /* the driver delivered it as WIFI_PKT_MISC */
+#define UDS_NIFI_RX_NOT_LEGACY 0x10 /* sig_mode != 0 (HT/VHT); never set on chips with 802.11ax (no sig_mode there) */
 
 #define UDS_TX_NO_ACK 0x01
 #define UDS_RX_TRUNCATED 0x01

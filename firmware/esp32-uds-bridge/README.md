@@ -234,6 +234,12 @@ gcc -I../main wire_test.c ../main/uds_wire.c -o wire_test && ./wire_test
 
 The emulator's copy is the Catch2 case `ESP32 wire` in `src/tests/core/hle/service/nwm/esp32_wire.cpp`.
 
+The NiFi capture's filter (`main/nifi_match.c`) has no ESP-IDF in it and its own test:
+
+```
+gcc -I../main nifi_match_test.c ../main/nifi_match.c -o nifi_match_test && ./nifi_match_test
+```
+
 ## Protocol
 
 Frame: `| version=1 | type | seq | flags | length:u16 LE | payload | crc32:u32 LE |`, CRC-32/ISO-HDLC over
@@ -313,6 +319,33 @@ Device to host: `0x81` HELLO_ACK `{proto, fw_major, fw_minor, factory_mac[6]}`, 
 `{request_type:u8, result:s32}` (echoes the request's `seq`), `0x83` RX `{channel, rssi, flags, mpdu}`,
 `0x85` STATS every 5 s (`rx_seen, rx_forwarded, rx_dropped, tx_ok, tx_failed, beacons_sent,
 usb_dropped`), `0x86` PONG.
+
+## Nintendo DS capture (NiFi), work in progress
+
+Firmware with HELLO_ACK feature `0x08` (`UDS_HELLO_FEATURE_NIFI`) can capture Nintendo DS local wireless, the first step towards
+melonDS trading with a retail DS (`main/nifi.h`). **Not yet run on a board.**
+
+| Type | Payload | Reply |
+| --- | --- | --- |
+| `0x20` NIFI_START | `channel:u8, flags:u8 (bit 0: every frame; bit 1: frames with a failed FCS too), mac[6]` | STATUS. The radio as START, but no beacon timer, and frames go out as NIFI_RX. STOP stops it |
+
+`0xA0` NIFI_RX: `channel:u8, rssi:s8, rate:u8 (wifi_phy_rate_t), flags:u8, match:u8, rx_state:u8, rx_timestamp:u32, callback_us:u32,
+sig_len:u16`, then the MPDU **with** its FCS (`main/uds_wire.h` has the bits). `main/nifi_match.c` picks the frames: beacons and probe
+responses with the DS vendor element (OUI `00:09:BF`), whose BSSID it learns; anything to or from a learned BSSID, and the stations
+seen talking to one (so their link-layer ACKs pass); and the multiplayer frames to `03:09:BF:00:00:xx` (CMD `:00`, ACK `:03`, reply
+`:10`).
+
+`tools/uds-nifi-capture` (Windows, Linux, macOS) drives it and writes a radiotap pcap for Wireshark (the board's receive timestamp as
+TSFT, rate, channel, signal, FCS), then sums up the rooms, the reply time the CMDs asked for, CMD -> reply and CMD -> ACK timing per
+client, WEP, receive errors and the capture callback's jitter:
+
+```
+uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--out FILE.pcap] [--seconds N] [--all] [--fcs-fail] [--list] [--log]
+```
+
+What the first capture of two retail DSes trading has to answer: does the ESP32 receive the CMDs (`0x0228`, Data+CF-Poll) and replies
+(`0x0158` / `0x0118`, CF-Ack) at all, and as DATA or MISC; at which rate and preamble; how long the reply window is; whether the game
+uses WEP. Answering CMDs and sending ACKs has to happen on the board (a round trip over USB is far too slow), next to the capture.
 
 ## Status: what has and has not been verified
 

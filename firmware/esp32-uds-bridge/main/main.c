@@ -228,6 +228,7 @@ static void handle_command(uds_wire_frame_t *frame)
         }
         break; /* the radio's own STOP, below */
     case UDS_CMD_START:
+    case UDS_CMD_NIFI_START:
     case UDS_CMD_SET_CHANNEL:
     case UDS_CMD_TX_FRAME:
     case UDS_CMD_SET_BEACON:
@@ -251,7 +252,7 @@ static void handle_command(uds_wire_frame_t *frame)
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
-        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH;
+        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH | UDS_HELLO_FEATURE_NIFI;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }
@@ -259,6 +260,10 @@ static void handle_command(uds_wire_frame_t *frame)
         /* {channel, mac[6]} plus an optional flags byte: bit 0 = decoy hardware MAC. */
         result = (n == 7 || n == 8) ? radio_start(p[0], p + 1, n == 8 && (p[7] & 1))
                                     : ESP_ERR_INVALID_SIZE;
+        break;
+    case UDS_CMD_NIFI_START:
+        /* {channel, flags, mac[6]}: the DS capture (nifi.h). */
+        result = n == 8 ? radio_start_nifi(p[0], p + 2, p[1]) : ESP_ERR_INVALID_SIZE;
         break;
     case UDS_CMD_STOP:
         result = radio_stop();

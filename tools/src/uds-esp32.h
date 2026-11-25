@@ -54,6 +54,8 @@ enum UDSEsp32Command {
 	UDS_ESP32_CMD_GB_STOP = 0x12,
 	// Firmware 1.6 on: a frame of the GB-Link Pico's serial protocol from the Pico mGBA stands in for (see udsEsp32GbPico).
 	UDS_ESP32_CMD_GB_PICO = 0x13,
+	// Firmware with UDS_ESP32_FEATURE_NIFI: the radio in Nintendo DS (NiFi) mode, captured frames as NIFI_RX (see udsEsp32NifiStart).
+	UDS_ESP32_CMD_NIFI_START = 0x20,
 };
 
 enum UDSEsp32Event {
@@ -69,6 +71,7 @@ enum UDSEsp32Event {
 	UDS_ESP32_EVT_GB_REPLY = 0x91,
 	UDS_ESP32_EVT_GB_STATS = 0x92,
 	UDS_ESP32_EVT_GB_PICO = 0x93, // a Pico frame to the Pico: the board drives the clock
+	UDS_ESP32_EVT_NIFI_RX = 0xA0,
 };
 
 #define UDS_ESP32_KEY_SLOT_DATA 0x2D // the 3DS UDS data key the board's wrapper needs
@@ -83,6 +86,24 @@ enum {
 	UDS_ESP32_TX_NO_ACK = 0x01, // group addressed: do not wait for an ACK
 	UDS_ESP32_RX_TRUNCATED = 0x01,
 };
+
+// NIFI_START's flags, and NIFI_RX's flags and match bits (the firmware's uds_wire.h and nifi_match.h).
+enum {
+	UDS_ESP32_NIFI_START_ALL = 0x01, // every frame, not only the DS's
+	UDS_ESP32_NIFI_START_FCS_FAIL = 0x02, // also frames whose FCS failed
+	UDS_ESP32_NIFI_RX_TRUNCATED = 0x01,
+	UDS_ESP32_NIFI_RX_FCS = 0x02, // the MPDU's last 4 bytes are its FCS
+	UDS_ESP32_NIFI_RX_ERROR = 0x04, // the radio reported a receive error (FCS failed)
+	UDS_ESP32_NIFI_RX_MISC = 0x08, // delivered by the driver as a MISC packet
+	UDS_ESP32_NIFI_RX_NOT_LEGACY = 0x10, // HT/VHT, not 802.11b/g
+	UDS_ESP32_NIFI_MATCH_BEACON = 0x01,
+	UDS_ESP32_NIFI_MATCH_MP = 0x02,
+	UDS_ESP32_NIFI_MATCH_BSS = 0x04,
+	UDS_ESP32_NIFI_MATCH_STATION = 0x08,
+	UDS_ESP32_NIFI_MATCH_OWN = 0x10,
+	UDS_ESP32_NIFI_MATCH_ALL = 0x80,
+};
+#define UDS_ESP32_NIFI_RX_HEADER 16
 
 // Framing, exposed for the test --------------------------------------------------------------------------------------------
 
@@ -117,6 +138,7 @@ enum {
 	UDS_ESP32_FEATURE_LINK_PORT = 0x01, // the console's link port on the board's GPIOs: the VC-Adapter board profile
 	UDS_ESP32_FEATURE_PICO_UART = 0x02, // a GB-Link wired to the board's UART
 	UDS_ESP32_FEATURE_NO_SWITCH = 0x04, // 2.1 on: no Switch side (the uds line; aio images from before its GBA side), so HELLO never restarts the board
+	UDS_ESP32_FEATURE_NIFI = 0x08, // NIFI_START / NIFI_RX: the Nintendo DS capture
 };
 
 struct UDSEsp32Info {
@@ -136,6 +158,21 @@ struct UDSEsp32Rx {
 	size_t length;
 };
 
+// A frame the board captured in NiFi mode.
+struct UDSEsp32NifiRx {
+	uint8_t channel;
+	int8_t rssi;
+	uint8_t rate; // wifi_phy_rate_t: 0 1M, 1 2M, 2 5.5M, 3 11M (long preamble); 5 2M, 6 5.5M, 7 11M (short); 8..15 OFDM
+	uint8_t flags; // UDS_ESP32_NIFI_RX_*
+	uint8_t match; // UDS_ESP32_NIFI_MATCH_*
+	uint8_t rxState;
+	uint32_t rxTimestamp; // us, the board's Wi-Fi clock
+	uint32_t callbackUs; // us, the board's esp_timer when its capture callback ran
+	uint16_t sigLen; // as the radio reported it, FCS included
+	const uint8_t* mpdu; // with the FCS when flags has UDS_ESP32_NIFI_RX_FCS; valid during the call
+	size_t length;
+};
+
 struct UDSEsp32;
 struct UDSEsp32Handlers {
 	void* context;
@@ -149,6 +186,8 @@ struct UDSEsp32Handlers {
 	// Firmware 1.6 on, the wrapper started with `pico`: a frame of the GB-Link Pico's protocol (| 47 42 | channel | length:u16 LE |
 	// payload |) for the Pico mGBA stands in for.
 	void (*gbPico)(void* context, const uint8_t* frame, size_t length);
+	// Firmware with UDS_ESP32_FEATURE_NIFI, after udsEsp32NifiStart.
+	void (*nifiRx)(void* context, const struct UDSEsp32NifiRx* rx);
 };
 
 struct Esp32Serial;
@@ -190,6 +229,10 @@ bool udsEsp32WaitReady(struct UDSEsp32* esp, unsigned timeoutMs);
 // `decoy`: the board's hardware gets the MAC with its first octet xor 0x02 (the optional flags byte of Start, bit 0), so that frames for
 // `mac` are ordinary captured traffic instead of being swallowed by the chip; the hardware then does not acknowledge them.
 bool udsEsp32Start(struct UDSEsp32* esp, uint8_t channel, const uint8_t mac[6], bool decoy);
+// Firmware with UDS_ESP32_FEATURE_NIFI: the radio in Nintendo DS mode on `channel`, owning `mac`, captured frames to nifiRx.
+// `flags`: UDS_ESP32_NIFI_START_*. Stopped by udsEsp32Stop. The board answers with a Status.
+bool udsEsp32NifiStart(struct UDSEsp32* esp, uint8_t channel, uint8_t flags, const uint8_t mac[6]);
+bool udsEsp32HasNifi(const struct UDSEsp32* esp);
 bool udsEsp32SendHello(struct UDSEsp32* esp); // one Hello; the answer arrives through udsEsp32Poll (info.valid)
 bool udsEsp32Stop(struct UDSEsp32* esp);
 bool udsEsp32SetChannel(struct UDSEsp32* esp, uint8_t channel);

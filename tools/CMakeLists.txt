@@ -33,6 +33,15 @@ if(WIN32)
 	target_link_libraries(ldn-console setupapi)
 endif()
 
+# Captures Nintendo DS local wireless (NiFi) with a board in NiFi mode, into a radiotap pcap with a timing summary. Windows, Linux, macOS.
+add_executable(uds-nifi-capture
+	src/uds-nifi-capture.c
+	src/uds-esp32.c
+	src/esp32-serial.c)
+if(WIN32)
+	target_link_libraries(uds-nifi-capture setupapi)
+endif()
+
 # The flasher's ROM loader client against a simulated ESP32-S3.
 add_executable(uds-esp32-flash-test
 	src/uds-esp32-flash-test.c

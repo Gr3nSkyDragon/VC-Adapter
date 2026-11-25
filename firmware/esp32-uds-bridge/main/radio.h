@@ -34,6 +34,8 @@ esp_err_t radio_init(uds_event_sink_t sink);
  * address instead, so frames sent to `mac` are treated as sniffed traffic (experiment: the
  * hardware then does not acknowledge them). */
 esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac);
+/* NiFi mode (nifi.h): no beacon timer, captured frames go to the sink as UDS_EVT_NIFI_RX. `flags`: UDS_NIFI_START_*. */
+esp_err_t radio_start_nifi(uint8_t channel, const uint8_t mac[6], uint8_t flags);
 esp_err_t radio_stop(void);
 esp_err_t radio_set_channel(uint8_t channel);
 /* rate500k: 0 = the default (1 Mbit/s), otherwise the rate in 500 kbit/s units (22 = 11 Mbit/s). */

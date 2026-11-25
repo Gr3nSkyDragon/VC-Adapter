@@ -2,6 +2,7 @@
 #include "radio.h"
 
 #include "diag.h"
+#include "nifi.h"
 #include "esp_log.h"
 
 #include <stdlib.h>
@@ -21,6 +22,8 @@
 #define BEACON_INTERVAL_US 102400 /* 100 TU */
 #define MAX_MPDU 2346
 #define RX_HEADER 3               /* channel, rssi, flags */
+/* RX (3DS) or NIFI_RX (DS, which keeps the FCS): the larger. */
+#define EVENT_BYTES (NIFI_RX_HEADER + MAX_MPDU + 4)
 #define NINTENDO_OUI_0 0x00
 #define NINTENDO_OUI_1 0x1F
 #define NINTENDO_OUI_2 0x32
@@ -40,6 +43,7 @@ static uds_event_sink_t s_sink;
 static uint32_t s_txdone_data_reports;
 static bool s_wifi_initialized;
 static bool s_running;
+static bool s_nifi; /* NiFi mode (nifi.h): set only while the radio is stopped */
 static uint8_t s_channel = 1;
 static uint8_t s_own_mac[6];
 static uint8_t s_watch_mac[6];
@@ -50,7 +54,7 @@ static SemaphoreHandle_t s_tx_lock;
 static esp_timer_handle_t s_beacon_timer;
 /* From the heap at radio_init, so that a board in GB-Link Switch LDN's mode (bridge_mode.h) does not carry them. */
 static uint8_t *s_beacon; /* MAX_MPDU */
-static uint8_t *s_event;  /* RX_HEADER + MAX_MPDU: promiscuous_rx, on the Wi-Fi task only */
+static uint8_t *s_event;  /* EVENT_BYTES: promiscuous_rx, on the Wi-Fi task only */
 static size_t s_beacon_length;
 static uint16_t s_beacon_sequence;
 static wifi_phy_rate_t s_current_rate = (wifi_phy_rate_t)-1;
@@ -123,6 +127,13 @@ static bool wanted(const uint8_t *frame, size_t length, int type, int subtype)
 static void promiscuous_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
 {
     const wifi_promiscuous_pkt_t *packet = buffer;
+    if (s_nifi) {
+        if (type != WIFI_PKT_CTRL) ++s_stats.rx_seen;
+        const int result = nifi_capture_rx(packet, type, s_event, EVENT_BYTES, s_sink);
+        if (result > 0) ++s_stats.rx_forwarded;
+        else if (result == 0) ++s_stats.rx_dropped;
+        return;
+    }
     if (type == WIFI_PKT_CTRL) {
         /* Only ACKs pass the control filter. One addressed to us means the peer received a
          * unicast frame we sent, which says whether our transmissions are being heard. */
@@ -209,7 +220,7 @@ esp_err_t radio_init(uds_event_sink_t sink)
     s_sink = sink;
     s_tx_lock = xSemaphoreCreateMutex();
     s_beacon = malloc(MAX_MPDU);
-    s_event = malloc(RX_HEADER + MAX_MPDU);
+    s_event = malloc(EVENT_BYTES);
     if (!s_tx_lock || !s_beacon || !s_event) return ESP_ERR_NO_MEM;
     const esp_timer_create_args_t timer_args = {.callback = beacon_tick, .name = "beacon"};
     return esp_timer_create(&timer_args, &s_beacon_timer);
@@ -268,7 +279,7 @@ static esp_err_t init_wifi_once(void)
     return ESP_OK;
 }
 
-esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
+static esp_err_t start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac, bool nifi, uint8_t nifi_flags)
 {
     if (channel < 1 || channel > 13) return ESP_ERR_INVALID_ARG;
     if (mac[0] & 1) return ESP_ERR_INVALID_ARG; /* the hardware needs an individual address */
@@ -282,6 +293,8 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
         s_running = false;
     }
     memcpy(s_own_mac, mac, 6);
+    s_nifi = nifi;
+    if (nifi) nifi_capture_reset(mac, nifi_flags);
     memset(&s_stats, 0, sizeof(s_stats));
     s_txdone_data_reports = 0;
     s_current_rate = (wifi_phy_rate_t)-1;
@@ -300,9 +313,12 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
 #endif
         esp_wifi_set_ps(WIFI_PS_NONE);
         esp_wifi_set_tx_done_cb(tx_done);
-        const wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT |
-                                                                 WIFI_PROMIS_FILTER_MASK_DATA |
-                                                                 WIFI_PROMIS_FILTER_MASK_CTRL};
+        /* NiFi mode adds MISC (in case the DS's CF-Poll / CF-Ack data subtypes come up as that) and, on request, frames with a
+         * failed FCS. */
+        uint32_t mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA | WIFI_PROMIS_FILTER_MASK_CTRL;
+        if (nifi) mask |= WIFI_PROMIS_FILTER_MASK_MISC;
+        if (nifi && (nifi_flags & UDS_NIFI_START_FCS_FAIL)) mask |= WIFI_PROMIS_FILTER_MASK_FCSFAIL;
+        const wifi_promiscuous_filter_t filter = {.filter_mask = mask};
         esp_wifi_set_promiscuous_filter(&filter);
         const wifi_promiscuous_filter_t control = {.filter_mask = WIFI_PROMIS_CTRL_FILTER_MASK_ACK};
         esp_wifi_set_promiscuous_ctrl_filter(&control);
@@ -313,7 +329,7 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
             s_running = true;
             set_tx_rate(WIFI_PHY_RATE_1M_L);
             esp_timer_stop(s_beacon_timer);
-            esp_timer_start_periodic(s_beacon_timer, BEACON_INTERVAL_US);
+            if (!nifi) esp_timer_start_periodic(s_beacon_timer, BEACON_INTERVAL_US);
         }
     }
     xSemaphoreGive(s_tx_lock);
@@ -322,6 +338,16 @@ esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
         diag_report("after the failed radio_start");
     }
     return result;
+}
+
+esp_err_t radio_start(uint8_t channel, const uint8_t mac[6], bool decoy_hw_mac)
+{
+    return start(channel, mac, decoy_hw_mac, false, 0);
+}
+
+esp_err_t radio_start_nifi(uint8_t channel, const uint8_t mac[6], uint8_t flags)
+{
+    return start(channel, mac, false, true, flags);
 }
 
 esp_err_t radio_stop(void)
