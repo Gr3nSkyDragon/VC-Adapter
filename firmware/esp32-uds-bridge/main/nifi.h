@@ -4,8 +4,10 @@
  * nifi_match.h picks out to the host as NIFI_RX events, with the receive timestamp, rate and FCS kept so the host can write a
  * pcap with radiotap and time the DS's CMD -> reply -> ACK exchange.
  *
- * The DS's multiplayer timing (a reply within its slot, microseconds after the host's CMD) is too tight for a round trip over
- * USB, so the part that answers CMDs and sends ACKs will live here on the board, next to the capture.
+ * The DS's multiplayer timing is too tight for a round trip over USB, so the part that takes part in a session will live here on
+ * the board, next to the capture. A client's reply starts a SIFS (about 11 us) after the CMD ends (the README's "What the captures
+ * showed"), too soon for software here, so the board is to host: it sends the CMDs and, about 395 us after each reply slot, the ACK,
+ * and the retail DS's hardware does the replying.
  */
 #ifndef UDS_NIFI_H
 #define UDS_NIFI_H

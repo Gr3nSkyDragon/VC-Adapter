@@ -12,11 +12,14 @@
  * and replies are CF-Poll / CF-Ack data subtypes), at what rate and preamble, how long a client has to answer a CMD, and how
  * much jitter the board's own receive path adds.
  *
- * Usage: uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--out FILE.pcap] [--seconds N]
- *                         [--all] [--fcs-fail] [--list] [--log]
+ * Usage: uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--quiet MS] [--out FILE.pcap]
+ *                         [--seconds N] [--all] [--fcs-fail] [--list] [--log]
  *   --esp32     the board's port (COM4, /dev/ttyACM0, /dev/cu.usbmodem1101); found by its USB ids on Windows, by name elsewhere
  *   --channel   stay on one channel
  *   --scan      channels to hop through until a DS beacon is heard (default 1,7,13), --dwell ms on each (default 1200)
+ *   --quiet     back to hopping once the channel it stays on has heard nothing from a DS this long (default 3000 ms; 0: stay).
+ *               A DS picks its channel (1, 7 or 13 in Nintendo's games) whenever it starts hosting, so a session that
+ *               follows a scan, as a trade after the Union Room, can be on another channel than the beacons first heard.
  *   --out       the pcap (default nifi-<date>-<time>.pcap)
  *   --seconds   stop after this long (default: Ctrl+C)
  *   --all       every frame the radio hears, not only the DS's (big pcaps)
@@ -350,7 +353,8 @@ static void _printSamples(const char* name, struct Samples* s, const char* unit)
 
 struct Room {
 	uint8_t bssid[6];
-	uint8_t channel;
+	uint8_t channel;    // the last channel its beacons came on
+	uint16_t channels;  // every channel they came on (bit n: channel n)
 	uint16_t beaconIntervalTu;
 	uint16_t capability;
 	unsigned beacons;
@@ -366,6 +370,10 @@ struct Client {
 
 static struct {
 	uint8_t locked; // the channel a DS beacon was heard on; 0 while scanning
+	uint32_t lastDsMs; // when the last DS frame came (_nowMs), for --quiet
+	struct { uint8_t channel; uint32_t atMs; } follows[32]; // the channels stayed on, in order
+	unsigned followCount;
+	uint32_t startMs;
 	unsigned frames, dsFrames, beacons, cmds, replies, acks, other, protectedFrames, errors, misc, truncated, notLegacy;
 	unsigned rates[16];
 	struct Room rooms[MAX_ROOMS];
@@ -458,7 +466,11 @@ static void _noteBeacon(const uint8_t* f, size_t length, uint8_t channel) {
 		memset(room, 0, sizeof(*room));
 		memcpy(room->bssid, bssid, 6);
 	}
+	if (room->beacons && room->channel != channel) {
+		printf("DS room %s now on channel %u (was %u)\n", _macText(bssid), channel, room->channel);
+	}
 	room->channel = channel;
+	room->channels |= (uint16_t) (1u << channel);
 	room->beaconIntervalTu = (uint16_t) (f[32] | (f[33] << 8));
 	room->capability = (uint16_t) (f[34] | (f[35] << 8));
 	size_t offset = 36;
@@ -521,6 +533,7 @@ static void _onRx(void* context, const struct UDSEsp32NifiRx* rx) {
 		return; // --all's other traffic: in the pcap, not in the summary
 	}
 	++sSeen.dsFrames;
+	sSeen.lastDsMs = _nowMs();
 	sSeen.rates[rx->rate & 15]++;
 
 	const size_t length = (rx->flags & UDS_ESP32_NIFI_RX_FCS) && rx->length >= 4 ? rx->length - 4 : rx->length;
@@ -547,6 +560,11 @@ static void _onRx(void* context, const struct UDSEsp32NifiRx* rx) {
 		++sSeen.beacons;
 		if (!sSeen.locked) {
 			sSeen.locked = rx->channel;
+			if (sSeen.followCount < sizeof(sSeen.follows) / sizeof(sSeen.follows[0])) {
+				sSeen.follows[sSeen.followCount].channel = rx->channel;
+				sSeen.follows[sSeen.followCount++].atMs = sSeen.lastDsMs;
+			}
+			printf("  staying on channel %u (a DS beacon from %s)\n", rx->channel, _macText(a3));
 		}
 		_noteBeacon(f, length, rx->channel);
 	} else if (type == 2 && _macEqual(a1, kMpCmd)) {
@@ -638,8 +656,15 @@ static void _summary(void) {
 	printf("\n");
 	for (i = 0; i < sSeen.roomCount; ++i) {
 		const struct Room* r = &sSeen.rooms[i];
-		printf("Room %s, channel %u, %u beacons, every %u TU, capability %04X; DS element (%u B):", _macText(r->bssid), r->channel, r->beacons,
-		       r->beaconIntervalTu, r->capability, r->vendorLength);
+		char channelText[40] = "";
+		unsigned ch;
+		for (ch = 1; ch <= 14; ++ch) {
+			if (r->channels & (1u << ch)) {
+				snprintf(channelText + strlen(channelText), sizeof(channelText) - strlen(channelText), "%s%u", channelText[0] ? "+" : "", ch);
+			}
+		}
+		printf("Room %s, channel %s, %u beacons, every %u TU, capability %04X; DS element (%u B):", _macText(r->bssid), channelText,
+		       r->beacons, r->beaconIntervalTu, r->capability, r->vendorLength);
 		unsigned b;
 		for (b = 0; b < r->vendorLength; ++b) {
 			printf(" %02X", r->vendor[b]);
@@ -653,7 +678,15 @@ static void _summary(void) {
 		}
 		printf("\n");
 	}
-	printf("Timing (receive timestamps; whether they mark a frame's start or end is to be confirmed, so the CMD's airtime is given):\n");
+	if (sSeen.followCount) {
+		printf("Channels followed:");
+		unsigned f;
+		for (f = 0; f < sSeen.followCount; ++f) {
+			printf("%s %u from %.0f s", f ? "," : "", sSeen.follows[f].channel, (sSeen.follows[f].atMs - sSeen.startMs) / 1000.0);
+		}
+		printf("\n");
+	}
+	printf("Timing (receive timestamps, which mark a frame's start; CMD airtime is the CMD's own time on air):\n");
 	_printSamples("CMD airtime", &sSeen.cmdAirtimes, "us");
 	_printSamples("CMD to next CMD", &sSeen.cmdInterval, "us");
 	_printSamples("CMD to ACK", &sSeen.ackDelay, "us");
@@ -681,8 +714,8 @@ static void _onSignal(int sig) {
 }
 
 static void _usage(void) {
-	fprintf(stderr, "usage: uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--out FILE.pcap] [--seconds N]\n"
-	                "                        [--all] [--fcs-fail] [--list] [--log]\n");
+	fprintf(stderr, "usage: uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--quiet MS] [--out FILE.pcap]\n"
+	                "                        [--seconds N] [--all] [--fcs-fail] [--list] [--log]\n");
 }
 
 int main(int argc, char** argv) {
@@ -690,7 +723,7 @@ int main(int argc, char** argv) {
 	const char* outPath = NULL;
 	char defaultOut[64];
 	uint8_t channels[MAX_CHANNELS] = {1, 7, 13};
-	unsigned channelCount = 3, dwellMs = 1200, seconds = 0;
+	unsigned channelCount = 3, dwellMs = 1200, quietMs = 3000, seconds = 0;
 	uint8_t flags = 0;
 	int i;
 	for (i = 1; i < argc; ++i) {
@@ -711,6 +744,8 @@ int main(int argc, char** argv) {
 			}
 		} else if (!strcmp(a, "--dwell") && more) {
 			dwellMs = (unsigned) atoi(argv[++i]);
+		} else if (!strcmp(a, "--quiet") && more) {
+			quietMs = (unsigned) atoi(argv[++i]);
 		} else if (!strcmp(a, "--out") && more) {
 			outPath = argv[++i];
 		} else if (!strcmp(a, "--seconds") && more) {
@@ -800,6 +835,7 @@ int main(int argc, char** argv) {
 	signal(SIGINT, _onSignal);
 	signal(SIGTERM, _onSignal);
 	const uint32_t start = _nowMs();
+	sSeen.startMs = start;
 	uint32_t hopped = start, lastStatus = start;
 	unsigned current = 0;
 	while (!sStop) {
@@ -808,6 +844,14 @@ int main(int argc, char** argv) {
 			break;
 		}
 		const uint32_t now = _nowMs();
+		if (sSeen.locked && channelCount > 1 && quietMs && now - sSeen.lastDsMs >= quietMs) {
+			// The DS went quiet here: it may be hosting again on another channel. Hop on from this one.
+			printf("  channel %u quiet for %.1f s: scanning again\n", sSeen.locked, (now - sSeen.lastDsMs) / 1000.0);
+			for (current = 0; current + 1 < channelCount && channels[current] != sSeen.locked; ++current) {
+			}
+			sSeen.locked = 0;
+			hopped = now - dwellMs;
+		}
 		if (!sSeen.locked && channelCount > 1 && now - hopped >= dwellMs) {
 			current = (current + 1) % channelCount;
 			udsEsp32SetChannel(&esp, channels[current]);

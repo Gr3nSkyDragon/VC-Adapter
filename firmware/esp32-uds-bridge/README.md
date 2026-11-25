@@ -323,7 +323,8 @@ usb_dropped`), `0x86` PONG.
 ## Nintendo DS capture (NiFi), work in progress
 
 Firmware with HELLO_ACK feature `0x08` (`UDS_HELLO_FEATURE_NIFI`) can capture Nintendo DS local wireless, the first step towards
-melonDS trading with a retail DS (`main/nifi.h`). **Not yet run on a board.**
+melonDS trading with a retail DS (`main/nifi.h`). Run on an ESP32-S3 (2.1-uds) for two captures of retail DSes trading; the
+reply side (the board taking part in a session) is not written yet.
 
 | Type | Payload | Reply |
 | --- | --- | --- |
@@ -340,12 +341,43 @@ TSFT, rate, channel, signal, FCS), then sums up the rooms, the reply time the CM
 client, WEP, receive errors and the capture callback's jitter:
 
 ```
-uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--out FILE.pcap] [--seconds N] [--all] [--fcs-fail] [--list] [--log]
+uds-nifi-capture [--esp32 PORT] [--channel N | --scan 1,7,13] [--dwell MS] [--quiet MS] [--out FILE.pcap] [--seconds N] [--all]
+                 [--fcs-fail] [--list] [--log]
 ```
 
-What the first capture of two retail DSes trading has to answer: does the ESP32 receive the CMDs (`0x0228`, Data+CF-Poll) and replies
-(`0x0158` / `0x0118`, CF-Ack) at all, and as DATA or MISC; at which rate and preamble; how long the reply window is; whether the game
-uses WEP. Answering CMDs and sending ACKs has to happen on the board (a round trip over USB is far too slow), next to the capture.
+It hops channels 1, 7 and 13 until a DS beacon is heard, stays on that channel, and goes back to hopping once it has heard
+nothing from a DS there for `--quiet` ms (3000; 0 stays). A DS picks its channel whenever it starts hosting, so the session
+that follows a search can be on another channel than the beacons first heard: the first capture (two DSes in a Gen 4 Union
+Room, the tool staying on channel 7 for good) heard the rooms' beacons and then 100 s of nothing while they traded. The summary
+lists the channels it followed and each room's channels.
+
+### What the captures showed (2026-11-25)
+
+Two retail DSes, Pokemon Platinum and HeartGold, in the Union Room: a greet, then a trade (Typhlosion for Ninetales). The second
+capture (with `--quiet`) has both sessions, on channel 13, about 23,000 frames; the first, which stayed on the channel it first
+heard beacons on, has only beacons.
+
+- The ESP32 receives all of it as DATA, MGMT and CTRL, none as MISC, with no receive errors: beacons, open-system authentication,
+  association, the 802.11 ACKs, CMDs, replies, ACKs and the deauthentication that ends a session. No WEP. Every frame is 2 Mbps,
+  short preamble.
+- A session: the client authenticates and associates (about 7 ms), then the host polls it at 60 Hz (CMD to next CMD: median
+  16.7 ms) until the client deauthenticates. The greet ran 13 s, the trade 103 s, each a session of its own; the host was the same
+  DS both times.
+- CMD: `0x0228` (Data+CF-Poll, from the AP) to `03:09:BF:00:00:00`, 226 bytes (30 with no data), duration 632; its body starts with
+  the reply time per client (`0x017E`, 382 us) and the bitmask of clients polled (`0x0002`: AID 1).
+- Reply: `0x1118` (Data+CF-Ack, to the AP, power management set) from the client, its third address `03:09:BF:00:00:10`, 66 bytes
+  (26 with no data; a bare `0x1158` CF-Ack is 24).
+- ACK: `0x0218` to `03:09:BF:00:00:03`, 28 bytes, its last two bytes the bitmask of clients whose reply the host did not get. That
+  bitmask shows how little the board missed: of the 167 CMDs with no reply in the capture, the host had none either for 162.
+- Receive timestamps mark a frame's start. The reply starts a SIFS (about 11 us) after the CMD ends: 1027 us after a 226-byte CMD
+  (1016 us on air), 243 us after a 30-byte one (232 us). The host's ACK starts about 395 us after the reply slot does, whatever the
+  reply's size: the 382 us slot and a SIFS. A 66-byte reply takes 376 us, so a client has about 6 us to spare.
+
+So a client's reply is hardware-timed, and the board cannot be the client of a retail host: its promiscuous callback runs a median
+237 us (p99 870 us) after its fastest, and a reply has to start within about 11 us of the CMD's end. The other way round, the
+board hosting for melonDS and the retail DS as the client, leaves the reply to the DS's hardware; the board sends the CMDs on its own
+schedule and the ACK about 395 us after each reply slot, and how strictly a retail client checks that ACK's time is what is to be
+found out next.
 
 ## Status: what has and has not been verified
 
