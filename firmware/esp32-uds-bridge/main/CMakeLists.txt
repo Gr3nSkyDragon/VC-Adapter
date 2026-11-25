@@ -21,6 +21,7 @@ endif()
 
 idf_component_register(
     SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "display.c" "scene.c" "screen.c"
+         "port_watch.c"
          ${gbwrap_sources}
     INCLUDE_DIRS "." "gbwrap/include"
     REQUIRES esp_wifi esp_event esp_netif esp_timer nvs_flash esp_ringbuf ${driver_requires}

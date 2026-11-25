@@ -10,6 +10,8 @@ CONFIG_UDS_LINK_PORT=y
 # default with both). Its link task keeps the second core with interrupts masked while the adapter is on, so the interrupt
 # watchdog must not check that core, and the task watchdog not wait for its idle task.
 CONFIG_UDS_SWITCH_LDN=y
+# The console sense divider on pin 1 (R1, R2) goes to the XIAO's MTCK pad.
+CONFIG_UDS_LINK_PORT_SENSE_GPIO=39
 # CONFIG_ESP_INT_WDT_CHECK_CPU1 is not set
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
 # The XIAO ESP32-S3's 8 MB of octal PSRAM (an ESP32-S3R8), for the Wi-Fi and network stacks' buffers: the emulated adapter keeps

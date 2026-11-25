@@ -337,7 +337,7 @@ static void command(const char *line)
     }
     if (!strncmp(line, "LDN_ANTENNA ", 12)) {
         const bool external = line[12] == '1';
-        const bool took = bridge_board_antenna(external);
+        const bool took = ldn_session_set_antenna(external);
         printf("LDN_ANTENNA %s %s rssi=%d\n", external ? "external" : "onboard", took ? "set" : "unsupported",
                ldn_probe_last_rssi());
         return;

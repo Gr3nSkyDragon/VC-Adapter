@@ -54,7 +54,11 @@ void ldn_host_poll(void);
 /* Set the advertised application data; read in place, must stay valid while the host
    runs. */
 void ldn_host_set_app_data(const uint8_t *data, int length);
+/* With no station in the room: move to another channel for `ms` and back, the room kept up
+   and its advertisements held meanwhile. 0, or the driver's error code. */
+int ldn_host_listen_away(unsigned channel, unsigned ms);
 int ldn_host_member_count(void);                /* stations, not counting the host */
+uint32_t ldn_host_relayed(void);                /* frames passed from one station to another */
 const ldn_host_member_t *ldn_host_member(int i);
 void ldn_host_set_handlers(void (*joined)(const ldn_host_member_t *),
                            void (*left)(const ldn_host_member_t *));

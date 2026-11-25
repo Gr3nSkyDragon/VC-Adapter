@@ -9,6 +9,8 @@
 #define PROPERTY_REPEAT_MS 500
 #define JOIN_REPLY_REPEAT_MS 500
 #define JOIN_REPLIES 5
+/* A Switch host resends a station list every 2 s until the station acknowledges it. */
+#define UPDATE_REPEAT_MS 2000
 #define FIRST_PROBE_MS 117
 #define PROBE_PERIOD_MS 302
 #define IDLE_TICKS 16
@@ -17,7 +19,7 @@
 #define BROADCAST_COPIES 5        /* kind 13 and each 0x11 form, 0.5 s apart */
 #define BROADCAST_PERIOD_MS 500
 #define MAX_FRAMES PIA_HOST_FRAMES
-/* Frames in flight to the child, below its 20-slot receive queue. */
+/* Frames in flight to a child, below its 20-slot receive queue. */
 #define INFLIGHT_MAX 12
 /* The child's game runs a link frame only when a parent frame is waiting and sends one
    datagram per frame run. Each datagram from it allows one data frame to it, so no more
@@ -34,6 +36,8 @@ static const char kDefaultName[] = "GBA";
 enum { STATUS_NORMAL, STATUS_MARKED, STATUS_CLEARED };
 
 static void emit(pia_host_t *h, const char *message) { if (h->log) h->log(message, h->user); }
+
+static int slot_of(const pia_host_t *h, const pia_host_station_t *s) { return (int)(s - h->st); }
 
 static bool ip_bytes(const char *text, uint8_t out[4])
 {
@@ -79,21 +83,64 @@ static bool state_only(const uint8_t *p, size_t len)
     return true;
 }
 
+/* ---- stations -------------------------------------------------------------- */
+
+/* Slots of the stations in the room from `min_state` on, in the order they joined. */
+static int stations_in_order(const pia_host_t *h, int min_state, int order[PIA_HOST_STATIONS])
+{
+    int n = 0;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+    {
+        if (h->st[i].state < min_state || h->st[i].state == 0) continue;
+        int j = n++;
+        while (j > 0 && h->st[order[j - 1]].join_number > h->st[i].join_number) { order[j] = order[j - 1]; --j; }
+        order[j] = i;
+    }
+    return n;
+}
+
+static pia_host_station_t *station_by_ip(pia_host_t *h, const char *ip)
+{
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+        if (h->st[i].state != 0 && strcmp(h->st[i].ip, ip) == 0) return &h->st[i];
+    return NULL;
+}
+
+/* A station whose child has the GBA's WA and has not been dropped. */
+static bool in_group(const pia_host_station_t *s) { return s->state != 0 && s->child_accepted && !s->child_disconnected; }
+
+static bool group_running(const pia_host_t *h)
+{
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i) if (in_group(&h->st[i])) return true;
+    return false;
+}
+
+/* Every station sends its next status soon: the membership changed. */
+static void status_changed(pia_host_t *h)
+{
+    ++h->net_seq;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+    {
+        h->st[i].status_acked = false;
+        h->st[i].next_net_ms = h->now_ms;
+    }
+}
+
 /* ---- datagram assembly ----------------------------------------------------- */
 
 /* Packet ids: one counter for the 0001 channel (protocol 3, kind 5), one for the child's
    id (protocol 10, kinds 2, 9, 13). */
-static uint16_t next_packet_id(pia_host_t *h, uint16_t dst)
+static uint16_t next_packet_id(pia_host_station_t *s, uint16_t dst)
 {
-    uint16_t *counter = &h->packet_ids[dst == 1 ? 0 : 1];
+    uint16_t *counter = &s->packet_ids[dst == 1 ? 0 : 1];
     if (*counter == 0) *counter = 1;
     uint16_t id = *counter;
     *counter = (uint16_t)(id == 65535 ? 1 : id + 1);
     return id;
 }
 
-static void send_messages(pia_host_t *h, const pia_message_t *messages, int count, uint16_t dst, uint16_t src,
-                          int packet, bool zip, bool establishing, bool footer)
+static void send_messages(pia_host_t *h, pia_host_station_t *s, const pia_message_t *messages, int count,
+                          uint16_t dst, uint16_t src, int packet, bool zip, bool establishing, bool footer)
 {
     pia_host_scratch_t *sc = &h->sc;
     uint8_t *body = sc->body, *staged = sc->staged, *datagram = sc->datagram;
@@ -117,7 +164,7 @@ static void send_messages(pia_host_t *h, const pia_message_t *messages, int coun
     if (footer)
     {
         if (length + 2 > sizeof(sc->body)) return;
-        bin_wb16(body + length, h->station_id);
+        bin_wb16(body + length, s->id);
         length += 2;
     }
     size_t padding = (16 - (length & 15)) & 15;
@@ -125,34 +172,37 @@ static void send_messages(pia_host_t *h, const pia_message_t *messages, int coun
     memset(body + length, 0xff, padding);
     length += padding;
 
-    uint16_t pid = packet >= 0 ? (uint16_t)packet : next_packet_id(h, dst);
+    uint16_t pid = packet >= 0 ? (uint16_t)packet : next_packet_id(s, dst);
     uint8_t flags = (uint8_t)((padding << 4) | (zipped ? 1 : 0) | (establishing ? 2 : 0));
     int n = pia_encrypt(&h->crypto, body, length, h->ours, dst, src, pid, h->nonce++, flags,
                         footer ? 2 : 0, datagram, sizeof(sc->datagram));
     if (h->nonce == 0) h->nonce = 1;
     if (n < 0) return;
-    h->send(datagram, (size_t)n, h->station_ip, h->user);
-    ++h->sent;
+    h->send(datagram, (size_t)n, s->ip, h->user);
+    ++s->sent;
 }
 
 /* Session message: dst 0000, establishing, no footer. */
-static void send_session(pia_host_t *h, uint8_t protocol, const uint8_t *payload, size_t len, uint16_t src,
-                         int packet, bool zip)
+static void send_session(pia_host_t *h, pia_host_station_t *s, uint8_t protocol, const uint8_t *payload, size_t len,
+                         uint16_t src, int packet, bool zip)
 {
     pia_message_t m = {.protocol = protocol, .payload = payload, .length = (uint16_t)len, .has_flags = false};
-    send_messages(h, &m, 1, 0, src, packet, zip, true, false);
+    send_messages(h, s, &m, 1, 0, src, packet, zip, true, false);
 }
 
 /* Connected message to the child or the 0001 channel, footer = the child's id. */
-static void send_connected(pia_host_t *h, uint8_t protocol, const uint8_t *payload, size_t len, uint16_t dst, bool zip)
+static void send_connected(pia_host_t *h, pia_host_station_t *s, uint8_t protocol, const uint8_t *payload, size_t len,
+                           uint16_t dst, bool zip)
 {
     pia_message_t m = {.protocol = protocol, .payload = payload, .length = (uint16_t)len, .has_flags = false};
-    send_messages(h, &m, 1, dst, h->our_id, -1, zip, false, true);
+    send_messages(h, s, &m, 1, dst, h->our_id, -1, zip, false, true);
 }
 
 /* ---- protocol 1: network status and property ------------------------------- */
 
-static void send_status(pia_host_t *h, int form)
+/* The host, then the stations in the order they joined, each at its position. A station
+   on its way out is marked in its own copy, then left out; the others no longer see it. */
+static void send_status(pia_host_t *h, pia_host_station_t *s, int form)
 {
     uint8_t p[162] = {0};
     p[0] = 1; p[1] = 0x11;
@@ -163,60 +213,79 @@ static void send_status(pia_host_t *h, int form)
     bin_wb32(p + 22, h->crypto.net_id);
     p[26] = 1; p[28] = 6;
     p[29] = form == STATUS_NORMAL ? 0 : 1;
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < 6; ++i) p[30 + 22 * i + 1] = 0xff;
+    int order[PIA_HOST_STATIONS];
+    const int n = stations_in_order(h, 1, order);
+    int at = 0;
+    for (int k = -1; k < n && at < 6; ++k)
     {
-        uint8_t *e = p + 30 + 22 * i;
-        e[1] = 0xff;
-        const char *ip = NULL;
-        if (i == 0) ip = h->ours;
-        else if (i == h->station_index && form != STATUS_CLEARED) ip = h->station_ip;
-        if (!ip || !ip_bytes(ip, e + 4)) continue;
-        e[1] = (uint8_t)i;
-        if (form == STATUS_MARKED && i != 0) e[3] = 1;
+        const char *ip = h->ours;
+        bool marked = false;
+        if (k >= 0)
+        {
+            const pia_host_station_t *o = &h->st[order[k]];
+            if (o == s && form == STATUS_CLEARED) continue;
+            if (o != s && o->teardown >= 3) continue;
+            marked = o == s && form == STATUS_MARKED;
+            ip = o->ip;
+        }
+        uint8_t *e = p + 30 + 22 * at;
+        if (!ip_bytes(ip, e + 4)) continue;
+        e[1] = (uint8_t)at;
+        if (marked) e[3] = 1;
         bin_wb16(e + 20, PIA_PORT);
+        ++at;
     }
     /* Unconnected form once the child's connection is gone. */
-    send_session(h, 1, p, sizeof(p), form == STATUS_NORMAL ? h->our_id : 0, 0, true);
+    send_session(h, s, 1, p, sizeof(p), form == STATUS_NORMAL ? h->our_id : 0, 0, true);
 }
 
-static void send_property(pia_host_t *h)
+static void send_property(pia_host_t *h, pia_host_station_t *s)
 {
     uint8_t *p = h->sc.property;
     int len = h->app_data_len, a = len < 92 ? len : 92;
+    int stations = 1;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i) stations += h->st[i].state != 0 && h->st[i].teardown < 3;
     memset(p, 0, 38);
     p[0] = 1; p[1] = 0x50;
     bin_wb16(p + 2, (uint16_t)len);
     bin_wb32(p + 4, h->property_seq);
     bin_wb32(p + 12, h->crypto.net_id);
-    p[17] = 2; p[19] = 6;                      /* stations, of a maximum of six */
+    p[17] = (uint8_t)stations; p[19] = 6;       /* stations, of a maximum of six */
     p[26] = 0x57; p[27] = 0x0f; p[28] = 1; p[29] = 1;
     bin_wb32(p + 30, (uint32_t)a);             /* game header length, string length */
     bin_wb32(p + 34, (uint32_t)(len - a));
     memcpy(p + 38, h->app_data, (size_t)len);
-    send_session(h, 1, p, 38 + (size_t)len, h->our_id, 0, true);
+    send_session(h, s, 1, p, 38 + (size_t)len, h->our_id, 0, true);
 }
 
 /* ---- protocol 13: session -------------------------------------------------- */
 
-static void send_station_list(pia_host_t *h)
+/* Station list: header, the host's record, the stations in the order they joined (each
+   with its position and join number), then the stations that left. */
+static void send_station_list(pia_host_t *h, pia_host_station_t *s)
 {
     uint8_t *p = h->sc.station_list;
     const uint8_t *name;
     int name_len;
     host_name(h, &name, &name_len);
-    uint8_t our_ip[4] = {0}, station_ip[4] = {0};
+    uint8_t our_ip[4] = {0};
     ip_bytes(h->ours, our_ip);
-    ip_bytes(h->station_ip, station_ip);
+    int order[PIA_HOST_STATIONS];
+    const int n = stations_in_order(h, 2, order);
     memset(p, 0, sizeof(h->sc.station_list));
     size_t o = 0;
     p[o++] = 5;
-    p[o++] = 0; p[o++] = 0; p[o++] = 1;
-    p[o++] = 0; p[o++] = 0; p[o++] = 3;
+    bin_wb16(p + o, (uint16_t)(h->list_seq - 1)); o += 2;
+    p[o++] = 1; p[o++] = 0;                    /* one fragment */
+    p[o++] = 0; p[o++] = 3;
     memcpy(p + o, h->our_mac, 6); o += 8;
     bin_wb16(p + o, h->our_id); o += 2;
-    p[o++] = 2;                                /* stations */
-    p[o++] = 0; p[o++] = 0; p[o++] = 1;
-    o += 6;
+    p[o++] = (uint8_t)(1 + n);
+    p[o++] = (uint8_t)h->left_count;
+    bin_wb16(p + o, h->list_seq); o += 2;
+    p[o++] = 0; p[o++] = h->member_left ? 1 : 0;
+    o += 4;
     /* Host record: address, per-console values, player name. */
     memcpy(p + o, h->our_mac, 6); o += 8;
     bin_wb16(p + o, h->our_id); o += 2;
@@ -229,53 +298,126 @@ static void send_station_list(pia_host_t *h)
     o += 3;
     p[o++] = (uint8_t)name_len; p[o++] = 1;
     memcpy(p + o, name, (size_t)name_len); o += (size_t)name_len;
-    /* Child record: address, then the tail of its join. */
-    memcpy(p + o, h->station_mac, 6); o += 8;
-    bin_wb16(p + o, h->station_id); o += 2;
-    memcpy(p + o, station_ip, 4); o += 4;
-    bin_wb16(p + o, PIA_PORT); o += 2;
-    p[o++] = 1; p[o++] = 0; p[o++] = 1; p[o++] = 0;
-    o += 33;
-    p[o++] = 1; p[o++] = 1; p[o++] = 0; p[o++] = 0;
-    memcpy(p + o, h->joiner_record, (size_t)h->joiner_record_len); o += (size_t)h->joiner_record_len;
-    send_connected(h, 13, p, o, 1, true);
+    /* Station records: address, position and join number, then the tail of its join. */
+    for (int k = 0; k < n; ++k)
+    {
+        const pia_host_station_t *e = &h->st[order[k]];
+        uint8_t ip[4] = {0};
+        ip_bytes(e->ip, ip);
+        memcpy(p + o, e->mac, 6); o += 8;
+        bin_wb16(p + o, e->id); o += 2;
+        memcpy(p + o, ip, 4); o += 4;
+        bin_wb16(p + o, PIA_PORT); o += 2;
+        p[o++] = (uint8_t)(k + 1); p[o++] = 0; p[o++] = e->join_number; p[o++] = 0;
+        o += 33;
+        p[o++] = 1; p[o++] = 1; p[o++] = 0; p[o++] = 0;
+        memcpy(p + o, e->joiner_record, (size_t)e->joiner_record_len); o += (size_t)e->joiner_record_len;
+    }
+    /* Left records: the list versions that added and removed it, its join number. */
+    for (int k = 0; k < h->left_count; ++k)
+    {
+        const pia_host_left_t *l = &h->left[k];
+        memcpy(p + o, l->mac, 6); o += 8;
+        bin_wb16(p + o, l->id); o += 2;
+        bin_wb16(p + o, l->joined_seq); o += 2;
+        bin_wb16(p + o, l->left_seq); o += 2;
+        p[o++] = l->join_number; p[o++] = 1; p[o++] = 1;
+        o += 32;
+        memcpy(p + o, l->record, l->record_len); o += l->record_len;
+    }
+    send_connected(h, s, 13, p, o, 1, true);
 }
 
-static void send_join_response(pia_host_t *h)
+static int list_position(const pia_host_t *h, const pia_host_station_t *s)
+{
+    int order[PIA_HOST_STATIONS];
+    const int n = stations_in_order(h, 2, order);
+    for (int k = 0; k < n; ++k) if (&h->st[order[k]] == s) return k + 1;
+    return n + 1;
+}
+
+static void send_join_response(pia_host_t *h, pia_host_station_t *s)
 {
     uint8_t p[37] = {2, 0x0d, 7, 1};
-    memcpy(p + 8, h->join_token, 4);
+    memcpy(p + 8, s->join_token, 4);
     memcpy(p + 12, h->our_mac, 6);
     bin_wb16(p + 20, h->our_id);
-    memcpy(p + 22, h->station_mac, 6);
-    bin_wb16(p + 30, h->station_id);
-    p[32] = 1; p[34] = 1;
-    send_connected(h, 13, p, sizeof(p), h->station_id, false);
+    memcpy(p + 22, s->mac, 6);
+    bin_wb16(p + 30, s->id);
+    p[32] = (uint8_t)list_position(h, s);
+    p[34] = s->join_number;
+    p[36] = (uint8_t)(s->join_number - 1);
+    send_connected(h, s, 13, p, sizeof(p), s->id, false);
 }
 
-static void send_disconnect_notice(pia_host_t *h)
+static void send_disconnect_notice(pia_host_t *h, pia_host_station_t *s)
 {
     uint8_t p[30] = {9};
     memcpy(p + 1, h->our_mac, 6);
     bin_wb16(p + 9, h->our_id);
     ip_bytes(h->ours, p + 12);
     bin_wb16(p + 16, PIA_PORT);
-    memcpy(p + 18, h->station_mac, 6);
-    bin_wb16(p + 26, h->station_id);
-    send_connected(h, 13, p, sizeof(p), h->station_id, false);
+    memcpy(p + 18, s->mac, 6);
+    bin_wb16(p + 26, s->id);
+    send_connected(h, s, 13, p, sizeof(p), s->id, false);
 }
 
-static void send_removed_broadcast(pia_host_t *h, bool last)
+static void send_removed_broadcast(pia_host_t *h, pia_host_station_t *s, bool last)
 {
     uint8_t p[10] = {0x0d};
     memcpy(p + 1, h->our_mac, 6);
     p[9] = 2;
-    send_session(h, 13, p, sizeof(p), h->our_id, last ? 0 : -1, false);
+    send_session(h, s, 13, p, sizeof(p), h->our_id, last ? 0 : -1, false);
+}
+
+/* Left records stay until every station in the list has acknowledged one naming them. */
+static void prune_left(pia_host_t *h)
+{
+    for (int k = 0; k < h->left_count;)
+    {
+        bool seen = true;
+        for (int i = 0; i < PIA_HOST_STATIONS && seen; ++i)
+        {
+            const pia_host_station_t *s = &h->st[i];
+            if (s->state >= 2 && (s->update_acked == 0 || bin_less(s->update_acked, h->left[k].left_seq))) seen = false;
+        }
+        if (!seen) { ++k; continue; }
+        memmove(&h->left[k], &h->left[k + 1], sizeof(h->left[0]) * (size_t)(h->left_count - k - 1));
+        --h->left_count;
+    }
+}
+
+static void on_update_ack(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
+{
+    if (len < 15 || bin_b16(p + 13) != h->list_seq) return;
+    s->update_acked = h->list_seq;
+    prune_left(h);
+}
+
+/* Keep-alive timeout report: the stations this one has not heard from. A Switch host drops
+   them; here the GBA decides who is in its group, so the report is only noted. */
+static void on_silent_report(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
+{
+    if (len < 14) return;
+    const int count = p[13];
+    for (int k = 0; k < count && 14 + 11 * (size_t)k + 11 <= len; ++k)
+    {
+        const uint16_t id = bin_b16(p + 14 + 11 * k + 8);
+        for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+        {
+            const pia_host_station_t *o = &h->st[i];
+            if (o->state < 2 || o->id != id || (s->silent_noted & (1u << i))) continue;
+            s->silent_noted |= (uint8_t)(1u << i);
+            char line[64];
+            snprintf(line, sizeof(line), "member %u does not hear member %u", s->index, o->index);
+            emit(h, line);
+        }
+    }
 }
 
 /* ---- protocol 3: round trips ----------------------------------------------- */
 
-static void send_probe(pia_host_t *h)
+static void send_probe(pia_host_t *h, pia_host_station_t *s)
 {
     uint8_t p[21] = {0};
     uint64_t stamp = (uint64_t)h->now_ms * 19200;          /* the 19.2 MHz system counter */
@@ -285,47 +427,47 @@ static void send_probe(pia_host_t *h)
     int slot = 0;
     for (int i = 0; i < PIA_HOST_PROBES; ++i)
     {
-        if (!h->probes[i].used) { slot = i; break; }
-        if (h->probes[i].sent_ms < h->probes[slot].sent_ms) slot = i;
+        if (!s->probes[i].used) { slot = i; break; }
+        if (s->probes[i].sent_ms < s->probes[slot].sent_ms) slot = i;
     }
-    h->probes[slot].stamp = stamp;
-    h->probes[slot].sent_ms = h->now_ms;
-    h->probes[slot].used = true;
-    send_connected(h, 3, p, sizeof(p), 1, false);
+    s->probes[slot].stamp = stamp;
+    s->probes[slot].sent_ms = h->now_ms;
+    s->probes[slot].used = true;
+    send_connected(h, s, 3, p, sizeof(p), 1, false);
 }
 
 /* Echo the child's probe: bytes 1..8 kept, the rest rewritten. */
-static void reply_probe(pia_host_t *h, const uint8_t *q)
+static void reply_probe(pia_host_t *h, pia_host_station_t *s, const uint8_t *q)
 {
     uint8_t p[21] = {1};
     memcpy(p + 1, q + 1, 8);
     bin_wb32(p + 13, (uint32_t)((uint64_t)h->now_ms * 1000));
-    bin_wb16(p + 17, h->station_id);
+    bin_wb16(p + 17, s->id);
     bin_wb16(p + 19, h->our_id);
-    send_connected(h, 3, p, sizeof(p), 1, false);
+    send_connected(h, s, 3, p, sizeof(p), 1, false);
 }
 
-static void match_probe(pia_host_t *h, const uint8_t *p)
+static void match_probe(pia_host_t *h, pia_host_station_t *s, const uint8_t *p)
 {
     uint64_t stamp = bin_b64(p + 1);
     for (int i = 0; i < PIA_HOST_PROBES; ++i)
-        if (h->probes[i].used && h->probes[i].stamp == stamp)
+        if (s->probes[i].used && s->probes[i].stamp == stamp)
         {
-            h->probes[i].used = false;
-            pia_reliable_add_rtt(&h->reliable, (double)(h->now_ms - h->probes[i].sent_ms));
+            s->probes[i].used = false;
+            pia_reliable_add_rtt(&s->reliable, (double)(h->now_ms - s->probes[i].sent_ms));
             return;
         }
 }
 
 /* ---- protocol 10: the reliable stream -------------------------------------- */
 
-static bool queue_reliable(pia_host_t *h, const uint8_t *data, size_t len, pia_packet_t *out)
+static bool queue_reliable(pia_host_t *h, pia_host_station_t *s, const uint8_t *data, size_t len, pia_packet_t *out)
 {
-    uint8_t flags = h->stream_opened ? 7 : 15;     /* the first frame of a stream is marked */
-    int seq = pia_reliable_queue(&h->reliable, data, len, flags, (double)h->now_ms);
+    uint8_t flags = s->stream_opened ? 7 : 15;     /* the first frame of a stream is marked */
+    int seq = pia_reliable_queue(&s->reliable, data, len, flags, (double)h->now_ms);
     if (seq < 0) return false;
-    h->stream_opened = true;
-    const pia_pending_t *e = &h->reliable.pending[(uint16_t)seq % PIA_RELIABLE_SLOTS];
+    s->stream_opened = true;
+    const pia_pending_t *e = pia_reliable_entry(&s->reliable, (uint16_t)seq);
     out->seq = (uint16_t)seq;
     out->flags = flags;
     out->data = e->data;
@@ -334,23 +476,23 @@ static bool queue_reliable(pia_host_t *h, const uint8_t *data, size_t len, pia_p
 }
 
 /* One datagram of reliable frames, plus any owed ack. */
-static void send_frames(pia_host_t *h, pia_packet_t *frames, int count)
+static void send_frames(pia_host_t *h, pia_host_station_t *s, pia_packet_t *frames, int count)
 {
     pia_host_scratch_t *sc = &h->sc;
-    uint8_t (*wrapped)[PIA_RELIABLE_PAYLOAD + 8] = sc->wrapped;
+    uint8_t (*wrapped)[PIA_HOST_FRAME + 8] = sc->wrapped;
     uint8_t *ack = sc->ack;
-    if (count < MAX_FRAMES && (h->ack_owed || pia_reliable_has_gap(&h->reliable)))
+    if (count < MAX_FRAMES && (s->ack_owed || pia_reliable_has_gap(&s->reliable)))
     {
-        pia_reliable_ack(&h->reliable, ack);
+        pia_reliable_ack(&s->reliable, ack);
         frames[count].seq = 0xfff0; frames[count].flags = 0; frames[count].data = ack; frames[count].length = 20;
         ++count;
-        h->ack_owed = false;
+        s->ack_owed = false;
     }
     if (count == 0) return;
     pia_message_t messages[MAX_FRAMES];
     for (int i = 0; i < count; ++i)
     {
-        int size = pia_reliable_wrap(&h->reliable, &frames[i], wrapped[i], sizeof(wrapped[i]));
+        int size = pia_reliable_wrap(&s->reliable, &frames[i], wrapped[i], sizeof(wrapped[i]));
         if (size < 0) return;
         messages[i].protocol = 10;
         messages[i].payload = wrapped[i];
@@ -358,7 +500,20 @@ static void send_frames(pia_host_t *h, pia_packet_t *frames, int count)
         messages[i].has_flags = frames[i].flags == 0;
         messages[i].flags = 0x40;
     }
-    send_messages(h, messages, count, h->station_id, h->our_id, -1, false, false, true);
+    send_messages(h, s, messages, count, s->id, h->our_id, -1, false, false, true);
+}
+
+/* One W frame to every station whose stream is up, as a Switch host sends WA and WD: a
+   station knows its own by the connect id. */
+static void send_to_group(pia_host_t *h, const uint8_t *frame, size_t len, pia_host_station_t *also)
+{
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+    {
+        pia_host_station_t *s = &h->st[i];
+        if (s != also && (s->state != 3 || s->child_disconnected)) continue;
+        pia_packet_t frames[MAX_FRAMES];
+        if (queue_reliable(h, s, frame, len, &frames[0])) send_frames(h, s, frames, 1);
+    }
 }
 
 /* WT: 'W' 'T', total - 4, stamp, send length at 8, data padded to 4. The 1-byte idle
@@ -377,210 +532,224 @@ static int wrap_wt(const uint8_t *data, size_t n, uint32_t stamp, uint8_t *out, 
     return (int)total;
 }
 
-static void note_wt(pia_host_t *h, uint32_t stamp, uint16_t seq, bool idle)
+static void note_wt(pia_host_t *h, pia_host_station_t *s, uint32_t stamp, uint16_t seq, bool idle)
 {
-    h->wt_ring[h->wt_ring_head].stamp = stamp;
-    h->wt_ring[h->wt_ring_head].seq = seq;
-    h->wt_ring[h->wt_ring_head].sent_ms = h->now_ms;
-    h->wt_ring[h->wt_ring_head].used = true;
-    h->wt_ring[h->wt_ring_head].idle = idle;
-    h->wt_ring_head = (h->wt_ring_head + 1) % PIA_HOST_WT_RING;
+    s->wt_ring[s->wt_ring_head].stamp = stamp;
+    s->wt_ring[s->wt_ring_head].seq = seq;
+    s->wt_ring[s->wt_ring_head].sent_ms = h->now_ms;
+    s->wt_ring[s->wt_ring_head].used = true;
+    s->wt_ring[s->wt_ring_head].idle = idle;
+    s->wt_ring_head = (s->wt_ring_head + 1) % PIA_HOST_WT_RING;
 }
 
 /* A WK gives an RTT sample for a WT sent once. */
-static void take_wk(pia_host_t *h, uint32_t stamp)
+static void take_wk(pia_host_t *h, pia_host_station_t *s, uint32_t stamp)
 {
-    ++h->wk_acks;
+    ++s->wk_acks;
     for (int i = 0; i < PIA_HOST_WT_RING; ++i)
     {
-        if (!h->wt_ring[i].used || h->wt_ring[i].stamp != stamp) continue;
-        h->wt_ring[i].used = false;
-        const pia_pending_t *e = &h->reliable.pending[h->wt_ring[i].seq % PIA_RELIABLE_SLOTS];
-        if (e->used && e->seq == h->wt_ring[i].seq && e->resends == 0)
-            pia_reliable_add_rtt(&h->reliable, (double)(h->now_ms - h->wt_ring[i].sent_ms));
+        if (!s->wt_ring[i].used || s->wt_ring[i].stamp != stamp) continue;
+        s->wt_ring[i].used = false;
+        const pia_pending_t *e = pia_reliable_entry(&s->reliable, s->wt_ring[i].seq);
+        if (e && e->resends == 0) pia_reliable_add_rtt(&s->reliable, (double)(h->now_ms - s->wt_ring[i].sent_ms));
         return;
     }
 }
 
-static void note_child_stamp(pia_host_t *h, uint32_t stamp)
+static void note_child_stamp(pia_host_station_t *s, uint32_t stamp)
 {
-    if (h->child_stamp_valid)
+    if (s->child_stamp_valid)
     {
-        uint32_t elapsed = stamp - h->child_stamp;
-        if (elapsed > 1 && elapsed < 300) h->child_skipped += (int)elapsed - 1;
+        uint32_t elapsed = stamp - s->child_stamp;
+        if (elapsed > 1 && elapsed < 300) s->child_skipped += (int)elapsed - 1;
     }
-    h->child_stamp = stamp;
-    h->child_stamp_valid = true;
+    s->child_stamp = stamp;
+    s->child_stamp_valid = true;
 }
 
-static void deliver_child_wt(pia_host_t *h, const uint8_t *p, size_t len)
+static void deliver_child_wt(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
 {
     if (len < 12) return;
-    note_child_stamp(h, bin_u32(p + 4));
-    /* Length at byte 8 from a Switch, byte 9 from our joiner. */
+    note_child_stamp(s, bin_u32(p + 4));
+    /* Length at byte 8 from a Switch, byte 9 from our joiner as the first client. */
     size_t n = p[8] ? (size_t)(p[8] & 0x7f) : p[9];
     if (n > len - 12) n = len - 12;
-    ++h->child_frames;
-    if (n > 0 && h->deliver) h->deliver(p + 12, n, h->user);
+    ++s->child_frames;
+    if (n > 0 && h->deliver) h->deliver(p + 12, n, slot_of(h, s), h->user);
 }
 
 /* One child stream frame, in order. */
-static void feed(pia_host_t *h, const uint8_t *p, size_t len)
+static void feed(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
 {
     if (len < 4 || p[0] != 0x57 || (size_t)bin_u16(p + 2) + 4 != len) return;   /* metadata: nothing to do */
     if (p[1] == 0x43 && len >= 6)
     {
-        if (h->child_disconnected) return;
-        memcpy(h->connect_id, p + 4, 2);
-        if (!h->connect_requested) emit(h, "WC");
-        h->connect_requested = true;
+        if (s->child_disconnected) return;
+        memcpy(s->connect_id, p + 4, 2);
+        if (!s->connect_requested)
+        {
+            char line[32];
+            snprintf(line, sizeof(line), "WC from member %u", s->index);
+            emit(h, line);
+        }
+        s->connect_requested = true;
     }
-    else if (p[1] == 0x54) deliver_child_wt(h, p, len);
-    else if (p[1] == 0x4b && len >= 16) take_wk(h, bin_u32(p + 12));
+    else if (p[1] == 0x54) deliver_child_wt(h, s, p, len);
+    else if (p[1] == 0x4b && len >= 16) take_wk(h, s, bin_u32(p + 12));
 }
 
 /* Pia retransmits out of order, but the games need their +1 mod 8 sequence, so child
    frames are delivered in order. A frame with no room to wait is left unacked and resent. */
-static void resequence(pia_host_t *h, uint16_t seq, uint16_t low, const uint8_t *inner, size_t len)
+static void resequence(pia_host_t *h, pia_host_station_t *s, uint16_t seq, uint16_t low, const uint8_t *inner, size_t len)
 {
-    if (h->next_deliver < 0) h->next_deliver = low;
-    uint16_t next = (uint16_t)h->next_deliver;
+    if (s->next_deliver < 0) s->next_deliver = low;
+    uint16_t next = (uint16_t)s->next_deliver;
     if (seq == next)
     {
-        pia_reliable_receive(&h->reliable, seq, low);
-        feed(h, inner, len);
+        pia_reliable_receive(&s->reliable, seq, low);
+        feed(h, s, inner, len);
         next = (uint16_t)(next + 1);
         for (bool again = true; again;)
         {
             again = false;
             for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
-                if (h->hold[i].used && h->hold[i].seq == next)
+                if (s->hold[i].used && s->hold[i].seq == next)
                 {
-                    h->hold[i].used = false;
-                    feed(h, h->hold[i].data, h->hold[i].length);
+                    s->hold[i].used = false;
+                    feed(h, s, s->hold[i].data, s->hold[i].length);
                     next = (uint16_t)(next + 1);
                     again = true;
                     break;
                 }
         }
-        h->next_deliver = next;
+        s->next_deliver = next;
         return;
     }
     if (!bin_less(next, seq) || (uint16_t)(seq - next) >= 4096)
     {
-        pia_reliable_receive(&h->reliable, seq, low);    /* a copy of a delivered frame */
+        pia_reliable_receive(&s->reliable, seq, low);    /* a copy of a delivered frame */
         return;
     }
-    if (len > PIA_HOST_HOLD_BYTES) { ++h->hold_dropped; return; }
+    if (len > PIA_HOST_HOLD_BYTES) { ++s->hold_dropped; return; }
     for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
-        if (h->hold[i].used && h->hold[i].seq == seq) return;
+        if (s->hold[i].used && s->hold[i].seq == seq) return;
     for (int i = 0; i < PIA_HOST_HOLD_SLOTS; ++i)
-        if (!h->hold[i].used)
+        if (!s->hold[i].used)
         {
-            h->hold[i].used = true;
-            h->hold[i].seq = seq;
-            h->hold[i].length = (uint16_t)len;
-            memcpy(h->hold[i].data, inner, len);
-            pia_reliable_receive(&h->reliable, seq, low);
+            s->hold[i].used = true;
+            s->hold[i].seq = seq;
+            s->hold[i].length = (uint8_t)len;
+            memcpy(s->hold[i].data, inner, len);
+            pia_reliable_receive(&s->reliable, seq, low);
             return;
         }
-    ++h->hold_dropped;
+    ++s->hold_dropped;
 }
 
-static void on_reliable(pia_host_t *h, const uint8_t *p, size_t len)
+static void on_reliable(pia_host_t *h, pia_host_station_t *s, const uint8_t *p, size_t len)
 {
-    if (len < 8 || bin_b16(p + 1) > len - 8 || p[7] != 0) { ++h->rx_bad_frame; return; }
+    if (len < 8 || bin_b16(p + 1) > len - 8 || p[7] != 0) { ++s->rx_bad_frame; return; }
     uint16_t inner_len = bin_b16(p + 1), seq = bin_b16(p + 3), low = bin_b16(p + 5);
     const uint8_t *inner = p + 8;
     if ((p[0] & 1) == 0)
     {
-        pia_reliable_acknowledge(&h->reliable, inner, inner_len, (double)h->now_ms);
+        pia_reliable_acknowledge(&s->reliable, inner, inner_len, (double)h->now_ms);
         return;
     }
-    h->ack_owed = true;
-    resequence(h, seq, low, inner, inner_len);
+    s->ack_owed = true;
+    resequence(h, s, seq, low, inner, inner_len);
 }
 
 /* ---- inbound --------------------------------------------------------------- */
 
-static void on_join(pia_host_t *h, const pia_message_t *m, uint16_t src)
+static void on_join(pia_host_t *h, pia_host_station_t *s, const pia_message_t *m, uint16_t src)
 {
     const uint8_t *p = m->payload;
-    if (m->length < 84) { ++h->rx_bad_frame; return; }
+    if (m->length < 84) { ++s->rx_bad_frame; return; }
     uint16_t id = bin_b16(p + 28);
     if (id == 0) id = src;
     if (id == 0 || id == h->our_id) return;
-    if (h->state >= 2)
+    if (s->state >= 2)
     {
-        /* Join repeated: our reply was lost. One station only. */
-        if (id != h->station_id) return;
-        send_station_list(h);
-        send_join_response(h);
+        /* Join repeated: our reply was lost. */
+        if (id != s->id) return;
+        send_station_list(h, s);
+        send_join_response(h, s);
         return;
     }
-    h->station_id = id;
+    s->id = id;
     static const uint8_t zero_mac[6];
-    if (memcmp(p + 20, zero_mac, 6) != 0) memcpy(h->station_mac, p + 20, 6);
+    if (memcmp(p + 20, zero_mac, 6) != 0) memcpy(s->mac, p + 20, 6);
     int tail = m->length - 83;
     if (tail > PIA_HOST_RECORD_BYTES) tail = PIA_HOST_RECORD_BYTES;
-    memcpy(h->joiner_record, p + 83, (size_t)tail);
-    h->joiner_record_len = tail;
-    esp_fill_random(h->join_token, sizeof(h->join_token));
-    h->state = 2;
-    h->joined_ms = h->now_ms;
-    h->join_replies = 1;
-    h->next_join_reply_ms = h->now_ms + JOIN_REPLY_REPEAT_MS;
-    h->next_probe_ms = h->now_ms + FIRST_PROBE_MS;
+    memcpy(s->joiner_record, p + 83, (size_t)tail);
+    s->joiner_record_len = tail;
+    esp_fill_random(s->join_token, sizeof(s->join_token));
+    s->state = 2;
+    s->joined_ms = h->now_ms;
+    s->join_replies = 1;
+    s->next_join_reply_ms = h->now_ms + JOIN_REPLY_REPEAT_MS;
+    s->next_probe_ms = h->now_ms + FIRST_PROBE_MS;
+    /* A new list version; the stations already in hear of it too. */
+    s->joined_seq = ++h->list_seq;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+        if (&h->st[i] != s && h->st[i].state >= 2) h->st[i].next_update_ms = h->now_ms;
     char line[40];
-    snprintf(line, sizeof(line), "join from station id=%04x", h->station_id);
+    snprintf(line, sizeof(line), "join from station id=%04x", s->id);
     emit(h, line);
-    send_station_list(h);
-    send_join_response(h);
+    send_station_list(h, s);
+    send_join_response(h, s);
+    s->next_update_ms = h->now_ms + UPDATE_REPEAT_MS;
 }
 
-static void dispatch(pia_host_t *h, const pia_message_t *m, uint16_t src)
+static void dispatch(pia_host_t *h, pia_host_station_t *s, const pia_message_t *m, uint16_t src)
 {
     const uint8_t *p = m->payload;
     if (m->protocol == 1)
     {
         if (m->length < 8 || p[0] != 1) return;
         uint32_t seq = bin_b32(p + 4);
-        if (p[1] == 0x12 && seq == h->net_seq) h->status_acked = true;
-        else if (p[1] == 0x51 && seq == h->property_seq) h->property_acked = true;
+        if (p[1] == 0x12 && seq == h->net_seq) s->status_acked = true;
+        else if (p[1] == 0x51 && seq == h->property_seq) s->property_acked = true;
     }
     else if (m->protocol == 13)
     {
         if (m->length < 1) return;
-        if (p[0] == 0) on_join(h, m, src);
-        else if (h->state >= 2) h->child_alive = true;
+        if (p[0] == 0) on_join(h, s, m, src);
+        else if (s->state >= 2)
+        {
+            s->child_alive = true;
+            if (p[0] == 6) on_update_ack(h, s, p, m->length);
+            else if (p[0] == 0x0b) on_silent_report(h, s, p, m->length);
+        }
     }
     else if (m->protocol == 3)
     {
-        if (h->state < 2 || m->length < 21) return;
-        h->child_alive = true;
-        if (p[0] == 0) reply_probe(h, p);
-        else if (p[0] == 1) match_probe(h, p);
+        if (s->state < 2 || m->length < 21) return;
+        s->child_alive = true;
+        if (p[0] == 0) reply_probe(h, s, p);
+        else if (p[0] == 1) match_probe(h, s, p);
     }
     else if (m->protocol == 10)
     {
-        if (h->state < 2) return;
-        h->child_alive = true;
-        if (h->state == 2) { h->state = 3; emit(h, "session up"); }
-        on_reliable(h, p, m->length);
+        if (s->state < 2) return;
+        s->child_alive = true;
+        if (s->state == 2) { s->state = 3; emit(h, "session up"); }
+        on_reliable(h, s, p, m->length);
     }
 }
 
 void pia_host_receive(pia_host_t *h, const uint8_t *data, size_t length, const char *source)
 {
-    if (h->state == 0) return;
-    if (strcmp(source, h->station_ip) != 0) { ++h->rx_wrong_source; return; }
-    if (length < 29) { ++h->rx_bad_frame; return; }
+    pia_host_station_t *s = station_by_ip(h, source);
+    if (!s) { ++h->rx_wrong_source; return; }
+    if (length < 29) { ++s->rx_bad_frame; return; }
     pia_host_scratch_t *sc = &h->sc;
     uint8_t *plain = sc->plain, *app = sc->app;
     int n = pia_decrypt(&h->crypto, data, length, source, plain, sizeof(sc->plain));
-    if (n < 0) { ++h->decrypt_failures; return; }
+    if (n < 0) { ++s->decrypt_failures; return; }
     int padding = data[5] >> 4, footer = data[12];
-    if (padding + footer > n) { ++h->rx_bad_frame; return; }
+    if (padding + footer > n) { ++s->rx_bad_frame; return; }
     n -= padding + footer;
 
     const uint8_t *body = plain;
@@ -588,7 +757,7 @@ void pia_host_receive(pia_host_t *h, const uint8_t *data, size_t length, const c
     if (data[5] & 1)
     {
         size = pia_decompress(plain, (size_t)n, app, sizeof(sc->app));
-        if (size < 0) { ++h->rx_unzip_fail; return; }
+        if (size < 0) { ++s->rx_unzip_fail; return; }
         body = app;
     }
     uint16_t src = bin_b16(data + 8);
@@ -597,200 +766,304 @@ void pia_host_receive(pia_host_t *h, const uint8_t *data, size_t length, const c
     pia_message_iter_init(&it, body, (size_t)size);
     while (pia_message_next(&it, &message))
     {
-        ++h->rx_messages;
-        dispatch(h, &message, src);
+        ++s->rx_messages;
+        dispatch(h, s, &message, src);
+        if (s->state == 0) return;
     }
-    ++h->received;
-    if (h->credits < CREDIT_CAP) ++h->credits;
-    h->last_child_datagram_ms = h->now_ms;
+    ++s->received;
+    if (s->credits < CREDIT_CAP) ++s->credits;
+    s->last_child_datagram_ms = h->now_ms;
 }
 
 /* ---- the parent's frames --------------------------------------------------- */
 
-void pia_host_parent_frame(pia_host_t *h, const uint8_t *payload, size_t length)
+static void parent_enqueue(pia_host_t *h, pia_host_station_t *s, const uint8_t *payload, size_t length)
 {
-    if (length == 0 || length > PIA_HOST_PARENT_BYTES) return;
     bool plain = state_only(payload, length);
     if (plain)
     {
-        memcpy(h->idle, payload, length);
-        h->idle_len = (uint8_t)length;
-        h->has_idle = true;
-        if (h->parent_count > 0)
+        if (s->parent_count > 0)
         {
-            int at = (h->parent_head + h->parent_count - 1) % PIA_HOST_PARENT_SLOTS;
-            if (state_only(h->parent[at].data, h->parent[at].length))
+            int at = (s->parent_head + s->parent_count - 1) % PIA_HOST_PARENT_SLOTS;
+            if (state_only(s->parent[at].data, s->parent[at].length))
             {
-                memcpy(h->parent[at].data, payload, length);
-                h->parent[at].length = (uint8_t)length;
+                memcpy(s->parent[at].data, payload, length);
+                s->parent[at].length = (uint8_t)length;
                 return;
             }
         }
     }
-    if (h->parent_count == PIA_HOST_PARENT_SLOTS)
+    if (s->parent_count == PIA_HOST_PARENT_SLOTS)
     {
-        ++h->parent_dropped;
+        ++s->parent_dropped;
         if (plain) return;
         int victim = 0;
-        for (int i = 0; i < h->parent_count; ++i)
+        for (int i = 0; i < s->parent_count; ++i)
         {
-            int at = (h->parent_head + i) % PIA_HOST_PARENT_SLOTS;
-            if (state_only(h->parent[at].data, h->parent[at].length)) { victim = i; break; }
+            int at = (s->parent_head + i) % PIA_HOST_PARENT_SLOTS;
+            if (state_only(s->parent[at].data, s->parent[at].length)) { victim = i; break; }
         }
-        for (int i = victim; i < h->parent_count - 1; ++i)
-            h->parent[(h->parent_head + i) % PIA_HOST_PARENT_SLOTS] = h->parent[(h->parent_head + i + 1) % PIA_HOST_PARENT_SLOTS];
-        --h->parent_count;
+        for (int i = victim; i < s->parent_count - 1; ++i)
+            s->parent[(s->parent_head + i) % PIA_HOST_PARENT_SLOTS] = s->parent[(s->parent_head + i + 1) % PIA_HOST_PARENT_SLOTS];
+        --s->parent_count;
     }
     /* Superseded key reports shed while frames wait: each one waiting is lag on both
        screens. */
-    for (int i = 0; h->sheddable && h->parent_count > PIA_HOST_SHED_AT && i < h->parent_count - 1;)
+    for (int i = 0; h->sheddable && s->parent_count > PIA_HOST_SHED_AT && i < s->parent_count - 1;)
     {
-        const int at = (h->parent_head + i) % PIA_HOST_PARENT_SLOTS;
-        if (!h->sheddable(h->parent[at].data, h->parent[at].length)) { ++i; continue; }
-        for (int j = i; j < h->parent_count - 1; ++j)
-            h->parent[(h->parent_head + j) % PIA_HOST_PARENT_SLOTS] = h->parent[(h->parent_head + j + 1) % PIA_HOST_PARENT_SLOTS];
-        --h->parent_count;
-        ++h->shed;
+        const int at = (s->parent_head + i) % PIA_HOST_PARENT_SLOTS;
+        if (!h->sheddable(s->parent[at].data, s->parent[at].length)) { ++i; continue; }
+        for (int j = i; j < s->parent_count - 1; ++j)
+            s->parent[(s->parent_head + j) % PIA_HOST_PARENT_SLOTS] = s->parent[(s->parent_head + j + 1) % PIA_HOST_PARENT_SLOTS];
+        --s->parent_count;
+        ++s->shed;
     }
-    int at = (h->parent_head + h->parent_count) % PIA_HOST_PARENT_SLOTS;
-    memcpy(h->parent[at].data, payload, length);
-    h->parent[at].length = (uint8_t)length;
-    ++h->parent_count;
+    int at = (s->parent_head + s->parent_count) % PIA_HOST_PARENT_SLOTS;
+    memcpy(s->parent[at].data, payload, length);
+    s->parent[at].length = (uint8_t)length;
+    ++s->parent_count;
+}
+
+void pia_host_parent_frame(pia_host_t *h, const uint8_t *payload, size_t length)
+{
+    if (length == 0 || length > PIA_HOST_PARENT_BYTES) return;
+    if (state_only(payload, length) && pia_host_station_count(h) > 0)
+    {
+        memcpy(h->idle, payload, length);
+        h->idle_len = (uint8_t)length;
+        h->has_idle = true;
+    }
+    /* Until the first child is in, the GBA's frames wait for its WA; a child joining a
+       running group starts from its own. */
+    const bool running = group_running(h);
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+    {
+        pia_host_station_t *s = &h->st[i];
+        if (s->state == 0 || s->child_disconnected || (running && !s->child_accepted)) continue;
+        parent_enqueue(h, s, payload, length);
+    }
+}
+
+void pia_host_parent_frame_to(pia_host_t *h, int station, const uint8_t *payload, size_t length)
+{
+    if (station < 0 || station >= PIA_HOST_STATIONS || length == 0 || length > PIA_HOST_PARENT_BYTES) return;
+    pia_host_station_t *s = &h->st[station];
+    if (s->state == 0 || !s->child_accepted || s->child_disconnected) return;
+    parent_enqueue(h, s, payload, length);
 }
 
 /* ---- tick ------------------------------------------------------------------ */
 
-static void stream_tick(pia_host_t *h)
+static void stream_tick(pia_host_t *h, pia_host_station_t *s)
 {
     pia_packet_t frames[MAX_FRAMES];
-    int count = pia_reliable_retransmit(&h->reliable, (double)h->now_ms, 2, frames, MAX_FRAMES);
-    h->resends += count;
-    if (h->child_accepted && !h->child_disconnected)
+    int count = pia_reliable_retransmit(&s->reliable, (double)h->now_ms, 2, frames, MAX_FRAMES);
+    s->resends += count;
+    if (s->child_accepted && !s->child_disconnected)
     {
-        const bool paced = h->now_ms - h->last_child_datagram_ms <= CHILD_QUIET_MS;
-        const bool room = pia_reliable_pending(&h->reliable) < INFLIGHT_MAX && (!paced || h->credits > 0);
-        if (room && h->wg_pending >= 0 && count < MAX_FRAMES)
+        const bool paced = h->now_ms - s->last_child_datagram_ms <= CHILD_QUIET_MS;
+        const bool room = pia_reliable_pending(&s->reliable) < INFLIGHT_MAX && (!paced || s->credits > 0);
+        if (room && s->wg_pending >= 0 && count < MAX_FRAMES)
         {
             uint8_t wg[8] = {0x57, 0x47, 4, 0};
-            bin_w32(wg + 4, (uint32_t)h->wg_pending);
-            if (queue_reliable(h, wg, sizeof(wg), &frames[count])) { ++count; h->wg_pending = -1; }
+            bin_w32(wg + 4, (uint32_t)s->wg_pending);
+            if (queue_reliable(h, s, wg, sizeof(wg), &frames[count])) { ++count; s->wg_pending = -1; }
         }
         uint8_t *wt = h->sc.wt;
         static const uint8_t idle_byte[1];
         int n = -1;
-        bool queued = h->parent_count > 0;
+        bool queued = s->parent_count > 0;
         if (queued && room)
         {
-            const uint8_t *data = h->parent[h->parent_head].data;
-            size_t len = h->parent[h->parent_head].length;
+            const uint8_t *data = s->parent[s->parent_head].data;
+            size_t len = s->parent[s->parent_head].length;
             /* WG 1 ends the join phase, before the first UNI frame. */
             bool uni = is_uni(data, len);
-            if (uni && !h->uni_sent && count < MAX_FRAMES)
+            if (uni && !s->uni_sent && count < MAX_FRAMES)
             {
                 uint8_t wg[8] = {0x57, 0x47, 4, 0, 1, 0, 0, 0};
-                if (queue_reliable(h, wg, sizeof(wg), &frames[count])) { ++count; h->uni_sent = true; }
+                if (queue_reliable(h, s, wg, sizeof(wg), &frames[count])) { ++count; s->uni_sent = true; }
             }
-            if (!uni || h->uni_sent) n = wrap_wt(data, len, h->timestamp, wt, PIA_RELIABLE_PAYLOAD);
+            if (!uni || s->uni_sent) n = wrap_wt(data, len, h->timestamp, wt, PIA_HOST_FRAME);
         }
-        else if (!queued && room && h->tick - h->last_wt_tick >= IDLE_TICKS)
-            n = h->has_idle ? wrap_wt(h->idle, h->idle_len, h->timestamp, wt, PIA_RELIABLE_PAYLOAD)
-                            : wrap_wt(idle_byte, 1, h->timestamp, wt, PIA_RELIABLE_PAYLOAD);
-        if (n > 0 && count < MAX_FRAMES && queue_reliable(h, wt, (size_t)n, &frames[count]))
+        else if (!queued && room && h->tick - s->last_wt_tick >= IDLE_TICKS)
+            n = h->has_idle ? wrap_wt(h->idle, h->idle_len, h->timestamp, wt, PIA_HOST_FRAME)
+                            : wrap_wt(idle_byte, 1, h->timestamp, wt, PIA_HOST_FRAME);
+        if (n > 0 && count < MAX_FRAMES && queue_reliable(h, s, wt, (size_t)n, &frames[count]))
         {
-            note_wt(h, h->timestamp, frames[count].seq, !queued);
-            if (paced) --h->credits;
+            note_wt(h, s, h->timestamp, frames[count].seq, !queued);
+            if (paced) --s->credits;
             ++count;
-            h->last_wt_tick = h->tick;
+            s->last_wt_tick = h->tick;
             if (queued)
             {
-                h->parent_head = (h->parent_head + 1) % PIA_HOST_PARENT_SLOTS;
-                --h->parent_count;
-                ++h->parent_frames;
+                s->parent_head = (s->parent_head + 1) % PIA_HOST_PARENT_SLOTS;
+                --s->parent_count;
+                ++s->parent_frames;
             }
-            if (!h->wt_sent) { h->wt_sent = true; h->wg_pending = 0; }
+            if (!s->wt_sent) { s->wt_sent = true; s->wg_pending = 0; }
         }
-        else if (queued && h->parent_count > 1 && state_only(h->parent[h->parent_head].data, h->parent[h->parent_head].length))
+        else if (queued && s->parent_count > 1 && state_only(s->parent[s->parent_head].data, s->parent[s->parent_head].length))
         {
             /* Stream full: a state-only frame gives way to the next. */
-            h->parent_head = (h->parent_head + 1) % PIA_HOST_PARENT_SLOTS;
-            --h->parent_count;
+            s->parent_head = (s->parent_head + 1) % PIA_HOST_PARENT_SLOTS;
+            --s->parent_count;
         }
     }
-    send_frames(h, frames, count);
+    send_frames(h, s, frames, count);
 }
 
-static void clear_station(pia_host_t *h)
+static void clear_station(pia_host_t *h, pia_host_station_t *s)
 {
-    pia_reliable_init(&h->reliable);
-    memset(h->hold, 0, sizeof(h->hold));
-    memset(h->wt_ring, 0, sizeof(h->wt_ring));
-    memset(h->probes, 0, sizeof(h->probes));
-    memset(h->packet_ids, 0, sizeof(h->packet_ids));
-    h->state = 0;
-    h->station_id = 0;
-    h->child_stamp_valid = false;
-    h->credits = 0;
-    h->last_child_datagram_ms = h->now_ms - CHILD_QUIET_MS - 1;
-    h->connect_requested = h->child_accepted = h->child_disconnected = false;
-    h->parent_head = h->parent_count = 0;
-    h->has_idle = false;
-    h->status_acked = h->property_acked = h->property_pending = false;
-    h->property_seq = 0;
-    h->child_alive = h->stream_opened = h->ack_owed = h->wt_sent = h->uni_sent = false;
-    h->join_replies = 0;
-    h->wg_pending = -1;
-    h->next_deliver = -1;
-    h->wt_ring_head = 0;
-    h->teardown = h->teardown_sent = 0;
+    pia_reliable_init(&s->reliable, s->pending, &s->pending_data[0][0], PIA_HOST_WINDOW, PIA_HOST_FRAME);
+    memset(s->hold, 0, sizeof(s->hold));
+    memset(s->wt_ring, 0, sizeof(s->wt_ring));
+    memset(s->probes, 0, sizeof(s->probes));
+    memset(s->packet_ids, 0, sizeof(s->packet_ids));
+    s->state = 0;
+    s->id = 0;
+    s->ip[0] = 0;
+    s->child_stamp_valid = false;
+    s->credits = 0;
+    s->last_child_datagram_ms = h->now_ms - CHILD_QUIET_MS - 1;
+    s->connect_requested = s->child_accepted = s->child_disconnected = false;
+    s->parent_head = s->parent_count = 0;
+    s->status_acked = s->property_acked = false;
+    s->update_acked = 0;
+    s->child_alive = s->stream_opened = s->ack_owed = s->wt_sent = s->uni_sent = false;
+    s->join_replies = 0;
+    s->wg_pending = -1;
+    s->next_deliver = -1;
+    s->wt_ring_head = 0;
+    s->teardown = s->teardown_sent = 0;
+    s->silent_noted = 0;
 }
 
-static void start_teardown(pia_host_t *h)
+/* A station gone from the room. The others get a station list naming it as left; the
+   last one out ends the session's numbering. */
+static void remove_station(pia_host_t *h, pia_host_station_t *s)
 {
-    h->teardown = 1;
-    h->teardown_sent = 0;
-    h->next_teardown_ms = h->now_ms + NOTICE_PERIOD_MS;
+    bool others = false;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i) others |= &h->st[i] != s && h->st[i].state >= 2;
+    if (s->state >= 2 && others)
+    {
+        if (h->left_count == PIA_HOST_LEFT)
+        {
+            memmove(&h->left[0], &h->left[1], sizeof(h->left[0]) * (PIA_HOST_LEFT - 1));
+            --h->left_count;
+        }
+        pia_host_left_t *l = &h->left[h->left_count++];
+        memcpy(l->mac, s->mac, 6);
+        l->id = s->id;
+        l->joined_seq = s->joined_seq;
+        l->left_seq = ++h->list_seq;
+        l->join_number = s->join_number;
+        l->record_len = (uint8_t)s->joiner_record_len;
+        memcpy(l->record, s->joiner_record, (size_t)s->joiner_record_len);
+        h->member_left = true;
+        for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+            if (&h->st[i] != s && h->st[i].state >= 2) h->st[i].next_update_ms = h->now_ms;
+    }
+    clear_station(h, s);
+    if (pia_host_station_count(h) == 0)
+    {
+        /* A new session: its station list and property start over. */
+        h->list_seq = 0;
+        h->left_count = 0;
+        h->member_left = false;
+        h->joins = 0;
+        h->property_seq = 0;
+        h->property_pending = false;
+        h->has_idle = false;
+    }
+}
+
+static void start_teardown(pia_host_t *h, pia_host_station_t *s)
+{
+    s->teardown = 1;
+    s->teardown_sent = 0;
+    s->next_teardown_ms = h->now_ms + NOTICE_PERIOD_MS;
 }
 
 /* Teardown: three disconnect notices, five removal broadcasts, then the status with the
    slot marked and then cleared. */
-static void teardown_tick(pia_host_t *h)
+static void teardown_tick(pia_host_t *h, pia_host_station_t *s)
 {
-    if (h->now_ms < h->next_teardown_ms) return;
+    if (h->now_ms < s->next_teardown_ms) return;
     int64_t period = BROADCAST_PERIOD_MS;
-    switch (h->teardown)
+    switch (s->teardown)
     {
     case 1:
-        send_disconnect_notice(h);
+        send_disconnect_notice(h, s);
         period = NOTICE_PERIOD_MS;
-        if (++h->teardown_sent >= NOTICE_COPIES) { h->teardown = 2; h->teardown_sent = 0; period = BROADCAST_PERIOD_MS; }
+        if (++s->teardown_sent >= NOTICE_COPIES) { s->teardown = 2; s->teardown_sent = 0; period = BROADCAST_PERIOD_MS; }
         break;
     case 2:
-        send_removed_broadcast(h, h->teardown_sent + 1 == BROADCAST_COPIES);
-        if (++h->teardown_sent >= BROADCAST_COPIES)
+        send_removed_broadcast(h, s, s->teardown_sent + 1 == BROADCAST_COPIES);
+        if (++s->teardown_sent >= BROADCAST_COPIES)
         {
-            h->teardown = 3; h->teardown_sent = 0;
-            ++h->net_seq;
-            h->status_acked = false;
+            s->teardown = 3; s->teardown_sent = 0;
+            status_changed(h);
         }
         break;
     case 3:
-        if (h->status_acked || h->teardown_sent >= BROADCAST_COPIES)
+        if (s->status_acked || s->teardown_sent >= BROADCAST_COPIES)
         {
-            h->teardown = 4; h->teardown_sent = 0;
-            ++h->net_seq;
-            h->status_acked = false;
+            s->teardown = 4; s->teardown_sent = 0;
+            status_changed(h);
         }
-        else { send_status(h, STATUS_MARKED); ++h->teardown_sent; break; }
+        else { send_status(h, s, STATUS_MARKED); ++s->teardown_sent; break; }
         /* fall through */
     case 4:
-        if (h->status_acked || h->teardown_sent >= BROADCAST_COPIES) { clear_station(h); return; }
-        send_status(h, STATUS_CLEARED);
-        ++h->teardown_sent;
+        if (s->status_acked || s->teardown_sent >= BROADCAST_COPIES) { remove_station(h, s); return; }
+        send_status(h, s, STATUS_CLEARED);
+        ++s->teardown_sent;
         break;
     default:
         return;
     }
-    h->next_teardown_ms = h->now_ms + period;
+    s->next_teardown_ms = h->now_ms + period;
+}
+
+static void station_tick(pia_host_t *h, pia_host_station_t *s)
+{
+    const int64_t now_ms = h->now_ms;
+    if (s->teardown) teardown_tick(h, s);
+    if (s->state == 0) return;
+
+    /* Repeated until acknowledged and until the join: a child whose join was lost resends
+       it on the next copy. */
+    if (s->teardown < 3 && (!s->status_acked || s->state < 2) && now_ms >= s->next_net_ms)
+    {
+        send_status(h, s, STATUS_NORMAL);
+        s->next_net_ms = now_ms + STATUS_REPEAT_MS;
+    }
+    if (s->state < 2) return;
+
+    if (!s->child_alive && s->join_replies < JOIN_REPLIES && now_ms >= s->next_join_reply_ms)
+    {
+        send_station_list(h, s);
+        send_join_response(h, s);
+        ++s->join_replies;
+        s->next_join_reply_ms = now_ms + JOIN_REPLY_REPEAT_MS;
+        s->next_update_ms = now_ms + UPDATE_REPEAT_MS;
+    }
+    else if (s->child_alive && s->teardown == 0 && s->update_acked != h->list_seq && now_ms >= s->next_update_ms)
+    {
+        send_station_list(h, s);
+        s->next_update_ms = now_ms + UPDATE_REPEAT_MS;
+    }
+    if (now_ms >= s->next_probe_ms)
+    {
+        send_probe(h, s);
+        s->next_probe_ms = now_ms + PROBE_PERIOD_MS;
+    }
+    if (s->child_accepted && h->app_data_len > 0 && !s->property_acked && now_ms >= s->next_property_ms)
+    {
+        send_property(h, s);
+        s->next_property_ms = now_ms + PROPERTY_REPEAT_MS;
+    }
+    stream_tick(h, s);
 }
 
 void pia_host_tick(pia_host_t *h, int64_t now_ms)
@@ -798,46 +1071,18 @@ void pia_host_tick(pia_host_t *h, int64_t now_ms)
     h->now_ms = now_ms;
     ++h->tick;
     ++h->timestamp;
-    if (h->state == 0) return;
-    if (h->teardown) teardown_tick(h);
-    if (h->state == 0) return;
-
-    /* Repeated until acknowledged and until the join: a child whose join was lost resends
-       it on the next copy. */
-    if (h->teardown < 3 && (!h->status_acked || h->state < 2) && now_ms >= h->next_net_ms)
+    if (h->property_pending && h->app_data_len > 0 && group_running(h))
     {
-        send_status(h, STATUS_NORMAL);
-        h->next_net_ms = now_ms + STATUS_REPEAT_MS;
-    }
-    if (h->state < 2) return;
-
-    if (!h->child_alive && h->join_replies < JOIN_REPLIES && now_ms >= h->next_join_reply_ms)
-    {
-        send_station_list(h);
-        send_join_response(h);
-        ++h->join_replies;
-        h->next_join_reply_ms = now_ms + JOIN_REPLY_REPEAT_MS;
-    }
-    if (now_ms >= h->next_probe_ms)
-    {
-        send_probe(h);
-        h->next_probe_ms = now_ms + PROBE_PERIOD_MS;
-    }
-    if (h->child_accepted && h->app_data_len > 0)
-    {
-        if (h->property_pending)
+        ++h->property_seq;
+        h->property_pending = false;
+        for (int i = 0; i < PIA_HOST_STATIONS; ++i)
         {
-            ++h->property_seq;
-            h->property_pending = h->property_acked = false;
-            h->next_keepalive_ms = now_ms;
-        }
-        if (!h->property_acked && now_ms >= h->next_keepalive_ms)
-        {
-            send_property(h);
-            h->next_keepalive_ms = now_ms + PROPERTY_REPEAT_MS;
+            h->st[i].property_acked = false;
+            h->st[i].next_property_ms = now_ms;
         }
     }
-    stream_tick(h);
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+        if (h->st[i].state != 0) station_tick(h, &h->st[i]);
 }
 
 /* ---- the bridge's side ----------------------------------------------------- */
@@ -857,7 +1102,7 @@ void pia_host_init(pia_host_t *h, const uint8_t ssid[16], const uint8_t our_mac[
     h->timestamp = 1;
     h->adapter_id = 1;
     h->net_seq = 1;
-    clear_station(h);
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i) clear_station(h, &h->st[i]);
 }
 
 void pia_host_set_app_data(pia_host_t *h, const uint8_t *data, int length)
@@ -869,71 +1114,103 @@ void pia_host_set_app_data(pia_host_t *h, const uint8_t *data, int length)
     h->property_pending = true;
 }
 
-void pia_host_station_joined(pia_host_t *h, const uint8_t mac[6], const char *ip, uint8_t index)
+int pia_host_station_joined(pia_host_t *h, const uint8_t mac[6], const char *ip, uint8_t index)
 {
-    clear_station(h);
-    memcpy(h->station_mac, mac, 6);
-    snprintf(h->station_ip, sizeof(h->station_ip), "%s", ip);
-    h->station_index = index >= 1 && index <= 5 ? index : 1;
-    ++h->net_seq;
+    pia_host_station_t *s = NULL;
+    for (int i = 0; i < PIA_HOST_STATIONS && !s; ++i) if (h->st[i].state == 0) s = &h->st[i];
+    if (!s) return -1;
+    clear_station(h, s);
+    memcpy(s->mac, mac, 6);
+    snprintf(s->ip, sizeof(s->ip), "%s", ip);
+    s->index = index >= 1 && index <= 5 ? index : 1;
+    s->join_number = (uint8_t)++h->joins;
+    status_changed(h);
     h->property_pending = h->app_data_len > 0;
-    h->state = 1;
-    send_status(h, STATUS_NORMAL);
-    h->next_net_ms = h->now_ms + STATUS_REPEAT_MS;
+    s->state = 1;
+    send_status(h, s, STATUS_NORMAL);
+    s->next_net_ms = h->now_ms + STATUS_REPEAT_MS;
     emit(h, "status sent");
+    return slot_of(h, s);
 }
 
-void pia_host_station_left(pia_host_t *h)
+void pia_host_station_left(pia_host_t *h, uint8_t index)
 {
-    if (h->state == 0) return;
+    pia_host_station_t *s = NULL;
+    for (int i = 0; i < PIA_HOST_STATIONS && !s; ++i) if (h->st[i].state != 0 && h->st[i].index == index) s = &h->st[i];
+    if (!s) return;
     /* Membership changes the teardown had not announced yet. */
-    h->net_seq += h->teardown < 3 ? 2 : h->teardown == 3 ? 1 : 0;
-    clear_station(h);
+    const int unannounced = s->teardown < 3 ? 2 : s->teardown == 3 ? 1 : 0;
+    remove_station(h, s);
+    for (int k = 0; k < unannounced; ++k) status_changed(h);
     emit(h, "child left");
 }
 
-bool pia_host_connect_pending(const pia_host_t *h)
+int pia_host_connect_pending(const pia_host_t *h)
 {
-    return h->connect_requested && !h->child_accepted && !h->child_disconnected;
+    int best = -1;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i)
+    {
+        const pia_host_station_t *s = &h->st[i];
+        if (s->state == 0 || !s->connect_requested || s->child_accepted || s->child_disconnected) continue;
+        if (best < 0 || s->join_number < h->st[best].join_number) best = i;
+    }
+    return best;
 }
 
-static void send_wd(pia_host_t *h)
+static void send_wd(pia_host_t *h, pia_host_station_t *s)
 {
-    uint8_t wd[6] = {0x57, 0x44, 2, 0, h->connect_id[0], h->connect_id[1]};
-    pia_packet_t frames[MAX_FRAMES];
-    if (!queue_reliable(h, wd, sizeof(wd), &frames[0])) return;
+    uint8_t wd[6] = {0x57, 0x44, 2, 0, s->connect_id[0], s->connect_id[1]};
+    send_to_group(h, wd, sizeof(wd), s);
     emit(h, "WD sent");
-    send_frames(h, frames, 1);
 }
 
-void pia_host_accept(pia_host_t *h, bool accepted)
+void pia_host_accept(pia_host_t *h, int station, bool accepted, uint8_t client_slot)
 {
-    if (!pia_host_connect_pending(h)) return;
+    if (station < 0 || station >= PIA_HOST_STATIONS) return;
+    pia_host_station_t *s = &h->st[station];
+    if (s->state == 0 || !s->connect_requested || s->child_accepted || s->child_disconnected) return;
     if (!accepted)
     {
-        h->child_disconnected = true;
-        start_teardown(h);
-        send_wd(h);
+        s->child_disconnected = true;
+        start_teardown(h, s);
+        send_wd(h, s);
         return;
     }
+    /* One adapter id per group, the next group's 3 on. */
+    if (!group_running(h))
+    {
+        h->wa_id = h->adapter_id;
+        h->adapter_id += 3;
+    }
     uint8_t wa[10] = {0x57, 0x41, 6, 0};
-    bin_w16(wa + 4, h->adapter_id);
-    memcpy(wa + 6, h->connect_id, 2);
-    pia_packet_t frames[MAX_FRAMES];
-    if (!queue_reliable(h, wa, sizeof(wa), &frames[0])) return;
-    h->adapter_id += 3;
-    h->child_accepted = true;
-    h->last_wt_tick = h->tick;
+    bin_w16(wa + 4, h->wa_id);
+    memcpy(wa + 6, s->connect_id, 2);
+    wa[8] = client_slot;
+    s->child_accepted = true;
+    s->client_slot = client_slot;
+    s->last_wt_tick = h->tick;
+    send_to_group(h, wa, sizeof(wa), s);
     emit(h, "WA sent");
-    send_frames(h, frames, 1);
 }
 
-void pia_host_disconnect_child(pia_host_t *h)
+void pia_host_disconnect_child(pia_host_t *h, int station)
 {
-    if (h->state < 2 || h->child_disconnected) return;
-    h->child_disconnected = true;
-    start_teardown(h);
-    if (h->connect_requested) send_wd(h);
+    if (station < 0 || station >= PIA_HOST_STATIONS) return;
+    pia_host_station_t *s = &h->st[station];
+    if (s->state < 2 || s->child_disconnected) return;
+    s->child_disconnected = true;
+    start_teardown(h, s);
+    if (s->connect_requested) send_wd(h, s);
 }
 
-bool pia_host_session_up(const pia_host_t *h) { return h->state == 3; }
+bool pia_host_session_up(const pia_host_t *h, int station)
+{
+    return station >= 0 && station < PIA_HOST_STATIONS && h->st[station].state == 3;
+}
+
+int pia_host_station_count(const pia_host_t *h)
+{
+    int n = 0;
+    for (int i = 0; i < PIA_HOST_STATIONS; ++i) n += h->st[i].state != 0;
+    return n;
+}

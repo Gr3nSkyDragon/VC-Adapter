@@ -15,7 +15,8 @@ void pia_link_init(pia_link_t *l, const uint8_t ssid[16], const uint8_t our_mac[
     memset(l, 0, sizeof(*l));
     pia_crypto_init(&l->crypto, ssid);
     pia_conn_init(&l->conn, our_mac, host_mac, our_ip);
-    pia_reliable_init(&l->reliable);
+    pia_reliable_init(&l->reliable, l->reliable_pending, &l->reliable_data[0][0], PIA_RELIABLE_SLOTS,
+                      PIA_RELIABLE_PAYLOAD);
     snprintf(l->ours, sizeof(l->ours), "%s", our_ip);
     snprintf(l->host, sizeof(l->host), "%s", host_ip);
     l->send = send; l->deliver = deliver; l->log = log; l->user = user;
@@ -135,7 +136,10 @@ void pia_link_enqueue(pia_link_t *l, const uint8_t *payload, size_t length)
     l->last_enqueued_len = (uint16_t)length;
 }
 
-static int wrap_wt(const uint8_t *slot, size_t len, uint32_t time, uint8_t *out, size_t cap)
+/* Bytes 8-11 carry the adapter's send header: a client's length sits at bit 8 + 5 × its slot,
+   so byte 9 for the first client. A later client also gets the length in byte 8, where a
+   Switch client puts it, so the host finds it whichever field it reads. */
+static int wrap_wt(const uint8_t *data, size_t len, uint32_t time, uint8_t client_slot, uint8_t *out, size_t cap)
 {
     size_t total = 12 + ((len + 3) & ~(size_t)3);
     if (total > cap) return -1;
@@ -143,8 +147,14 @@ static int wrap_wt(const uint8_t *slot, size_t len, uint32_t time, uint8_t *out,
     out[0] = 0x57; out[1] = 0x54;
     bin_w16(out + 2, (uint16_t)(total - 4));
     bin_w32(out + 4, time);
-    out[9] = (uint8_t)len;
-    memcpy(out + 12, slot, len);
+    if (client_slot == 0)
+        out[9] = (uint8_t)len;
+    else
+    {
+        bin_w32(out + 8, (uint32_t)len << (8 + 5 * client_slot));
+        out[8] = (uint8_t)len;
+    }
+    memcpy(out + 12, data, len);
     return (int)total;
 }
 
@@ -169,18 +179,20 @@ static int next_outbound(pia_link_t *l, uint8_t *out, size_t cap)
         l->out_head = (l->out_head + 1) % PIA_OUT_SLOTS;
         --l->out_count;
         if (l->stamp) l->stamp(l->outbound[slot].data, l->outbound[slot].length);
-        return wrap_wt(l->outbound[slot].data, l->outbound[slot].length, l->timestamp + (uint32_t)l->tick, out, cap);
+        return wrap_wt(l->outbound[slot].data, l->outbound[slot].length, l->timestamp + (uint32_t)l->tick,
+                       l->client_slot, out, cap);
     }
     if (!l->has_idle) return -1;
     ++l->repeated;
-    return wrap_wt(l->idle, l->idle_len, l->timestamp + (uint32_t)l->tick, out, cap);
+    return wrap_wt(l->idle, l->idle_len, l->timestamp + (uint32_t)l->tick, l->client_slot, out, cap);
 }
 
 /* ---- datagram assembly ----------------------------------------------------- */
 
-static void send_messages(pia_link_t *l, const pia_message_t *messages, int count, uint16_t dst,
-                          uint16_t src, bool compress, bool footer, bool establishing,
-                          int packet, int footer_id)
+/* `to` is a member's address; NULL sends to the host. */
+static void send_messages_to(pia_link_t *l, const char *to, const pia_message_t *messages, int count,
+                             uint16_t dst, uint16_t src, bool compress, bool footer, bool establishing,
+                             int packet, int footer_id)
 {
     if (count == 0) return;
     static uint8_t body[PIA_MAX_BODY], staged[PIA_MAX_BODY], datagram[PIA_MAX_DATAGRAM];
@@ -220,8 +232,45 @@ static void send_messages(pia_link_t *l, const pia_message_t *messages, int coun
                         flags, footer ? 2 : 0, datagram, sizeof(datagram));
     if (l->nonce == 0) l->nonce = 1;
     if (n < 0) return;
-    l->send(datagram, (size_t)n, l->host, l->user);
+    l->send(datagram, (size_t)n, to ? to : l->host, l->user);
     ++l->sent;
+}
+
+static void send_messages(pia_link_t *l, const pia_message_t *messages, int count, uint16_t dst,
+                          uint16_t src, bool compress, bool footer, bool establishing,
+                          int packet, int footer_id)
+{
+    send_messages_to(l, NULL, messages, count, dst, src, compress, footer, establishing, packet, footer_id);
+}
+
+/* ---- the other members ----------------------------------------------------- */
+
+/* Each member expects to hear from every other one: a Switch that gets nothing from a
+   member for about 20 s reports it to the host (session message 11), and the session ends
+   30 s after the newest member joined. Game data goes through the host, so the members are
+   probed directly. The Switches do not answer these probes; receiving them is enough. */
+#define PEER_PROBE_TICKS 18
+
+static void send_peer_probe(pia_link_t *l, const pia_peer_t *peer)
+{
+    uint8_t p[21] = {0};
+    const uint64_t ms = (uint64_t)link_now_ms();
+    bin_wb64(p + 1, ms * 19200);
+    bin_wb32(p + 13, (uint32_t)(ms * 1000));
+    bin_wb16(p + 19, l->conn.our_id);
+    const pia_message_t m = {.protocol = 3, .payload = p, .length = sizeof(p), .has_flags = false};
+    send_messages_to(l, peer->ip, &m, 1, 1, l->conn.our_id, false, true, false, -1, peer->id);
+}
+
+static void reply_peer_probe(pia_link_t *l, const char *ip, uint16_t id, const uint8_t *q)
+{
+    uint8_t p[21] = {1};
+    memcpy(p + 1, q + 1, 8);
+    bin_wb32(p + 13, (uint32_t)((uint64_t)link_now_ms() * 1000));
+    bin_wb16(p + 17, id);
+    bin_wb16(p + 19, l->conn.our_id);
+    const pia_message_t m = {.protocol = 3, .payload = p, .length = sizeof(p), .has_flags = false};
+    send_messages_to(l, ip, &m, 1, 1, l->conn.our_id, false, true, false, -1, id);
 }
 
 static void batch(pia_link_t *l, const pia_packet_t *frames, int count)
@@ -250,8 +299,28 @@ static void batch(pia_link_t *l, const pia_packet_t *frames, int count)
 static void feed_gba(pia_link_t *l, const uint8_t *p, size_t len)
 {
     if (len < 4 || (size_t)(bin_u16(p + 2) + 4) != len) return;
-    if (p[1] == 0x41) { l->accepted = true; emit(l, "Host accepted RFU connection"); return; }
-    if (p[1] == 0x44) { l->host_disconnected = true; return; }
+    /* WA (adapter id, connect id, client slot) and WD (connect id) go to every station in the
+       room; the connect id from a station's WC says whose they are. */
+    if (p[1] == 0x41)
+    {
+        if (len >= 10 && memcmp(p + 6, l->connect_id, 2) != 0) return;
+        if (len >= 10) l->client_slot = p[8] & 3;
+        l->accepted = true;
+        emit(l, "Host accepted RFU connection");
+        if (l->client_slot)
+        {
+            char line[48];
+            snprintf(line, sizeof(line), "Host made this station client %u", l->client_slot);
+            emit(l, line);
+        }
+        return;
+    }
+    if (p[1] == 0x44)
+    {
+        if (len >= 6 && memcmp(p + 4, l->connect_id, 2) != 0) return;
+        l->host_disconnected = true;
+        return;
+    }
     if (p[1] != 0x54 || len < 9) return;
 
     uint32_t time = bin_u32(p + 4);
@@ -308,12 +377,43 @@ static void resequence(pia_link_t *l, uint16_t seq, const uint8_t *inner, size_t
     }
 }
 
+static uint8_t plain[PIA_MAX_BODY], app[PIA_MAX_INFLATE];
+
+/* A datagram from another member; only its probes need an answer. */
+static void receive_member(pia_link_t *l, const uint8_t *data, size_t length, const char *source)
+{
+    if (length < 29) return;
+    int n = pia_decrypt(&l->crypto, data, length, source, plain, sizeof(plain));
+    if (n < 0) return;
+    const int padding = data[5] >> 4, footer = data[12];
+    if (padding + footer > n) return;
+    n -= padding + footer;
+    int size = n;
+    const uint8_t *body = plain;
+    if (data[5] & 1)
+    {
+        size = pia_decompress(plain, (size_t)n, app, sizeof(app));
+        if (size < 0) return;
+        body = app;
+    }
+    const uint16_t src = bin_b16(data + 8);
+    pia_message_iter_t it;
+    pia_message_t m;
+    pia_message_iter_init(&it, body, (size_t)size);
+    while (pia_message_next(&it, &m))
+        if (m.protocol == 3 && m.length >= 21 && m.payload[0] == 0 && src) reply_peer_probe(l, source, src, m.payload);
+}
+
 void pia_link_receive(pia_link_t *l, const uint8_t *data, size_t length, const char *source)
 {
     ++l->rx_seen;
-    if (strcmp(source, l->host) != 0) { ++l->rx_wrong_source; return; }
+    if (strcmp(source, l->host) != 0)
+    {
+        ++l->rx_wrong_source;
+        receive_member(l, data, length, source);
+        return;
+    }
     if (length < 29) { ++l->rx_short; return; }
-    static uint8_t plain[PIA_MAX_BODY], app[PIA_MAX_INFLATE];
     int n = pia_decrypt(&l->crypto, data, length, source, plain, sizeof(plain));
     if (n < 0) { ++l->decrypt_failures; return; }
 
@@ -386,6 +486,11 @@ void pia_link_tick(pia_link_t *l)
     double rtt;
     while (pia_conn_take_rtt(&l->conn, &rtt)) pia_reliable_add_rtt(&l->reliable, rtt);
     pia_conn_tick(&l->conn, l->tick);
+    if (pia_conn_connected(&l->conn) && l->tick - l->last_peer_probe >= PEER_PROBE_TICKS)
+    {
+        l->last_peer_probe = l->tick;
+        for (int i = 0; i < l->conn.peer_count; ++i) send_peer_probe(l, &l->conn.peers[i]);
+    }
 
     for (int i = 0; i < l->conn.outbox_count; ++i)
     {

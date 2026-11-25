@@ -8,6 +8,7 @@
 #define PIA_OUTBOX_PAYLOAD 128
 #define PIA_RTT_PENDING 32
 #define PIA_RTT_QUEUE 16
+#define PIA_PEERS 6
 
 typedef struct
 {
@@ -20,10 +21,14 @@ typedef struct
     int footer_id;   /* -1 to use dst */
 } pia_outbox_t;
 
+/* Another member of the session (not the host): its station id and address. */
+typedef struct { uint16_t id; char ip[16]; } pia_peer_t;
+
 typedef struct
 {
     uint16_t our_id, host_id;
     int state;
+    bool join_sent;
     int last_rtt_tick;
     uint8_t our_mac[6], remote_mac[6], random[4];
     char our_ip[16];
@@ -41,6 +46,9 @@ typedef struct
     uint8_t net_last_type;
     uint32_t net_last_seq;
     int net_repeats;
+    /* The other members, from the host's latest session update. */
+    pia_peer_t peers[PIA_PEERS];
+    int peer_count;
 } pia_conn_t;
 
 void pia_conn_init(pia_conn_t *c, const uint8_t our_mac[6], const uint8_t host_mac[6], const char *our_ip);

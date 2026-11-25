@@ -2,15 +2,26 @@
 
 static pia_pending_t *slot_of(pia_reliable_t *r, uint16_t seq)
 {
-    pia_pending_t *e = &r->pending[seq % PIA_RELIABLE_SLOTS];
+    pia_pending_t *e = &r->pending[seq & (r->slots - 1)];
     return e->used && e->seq == seq ? e : NULL;
 }
 
-void pia_reliable_init(pia_reliable_t *r)
+void pia_reliable_init(pia_reliable_t *r, pia_pending_t *pending, uint8_t *data, uint16_t slots, uint16_t payload)
 {
     memset(r, 0, sizeof(*r));
+    memset(pending, 0, sizeof(*pending) * slots);
+    for (uint16_t i = 0; i < slots; ++i) pending[i].data = data + (size_t)i * payload;
+    r->pending = pending;
+    r->slots = slots;
+    r->payload = payload;
     r->next = r->low = r->receive_next = 0xfff0;
     r->gap = -1;
+}
+
+const pia_pending_t *pia_reliable_entry(const pia_reliable_t *r, uint16_t seq)
+{
+    const pia_pending_t *e = &r->pending[seq & (r->slots - 1)];
+    return e->used && e->seq == seq ? e : NULL;
 }
 
 void pia_reliable_add_rtt(pia_reliable_t *r, double ms)
@@ -50,8 +61,8 @@ int pia_reliable_pending(const pia_reliable_t *r) { return r->pending_count; }
 
 int pia_reliable_queue(pia_reliable_t *r, const uint8_t *data, size_t len, uint8_t flags, double time)
 {
-    if (len > PIA_RELIABLE_PAYLOAD) return -1;
-    pia_pending_t *e = &r->pending[r->next % PIA_RELIABLE_SLOTS];
+    if (len > r->payload) return -1;
+    pia_pending_t *e = &r->pending[r->next & (r->slots - 1)];
     if (e->used) return -1;                      /* window full */
     memcpy(e->data, data, len);
     e->length = (uint16_t)len;

@@ -79,8 +79,8 @@ The telemetry the Pico sends twice a second (frames 0x0E, 0x2E, 0x1D, 0x1E) is s
   reported a lost link). After that the waits last 1 ms, one per breath (they were 100 us; the one lost word in a whole
   trading session was a search command after a quiet spell).
 - The adapter outlives the Switch side's sessions: the bridge restarts its room search in place rather than restarting the
-  board (`CONFIG_UDS_RFU_KEEP_ADAPTER`, see `../ldn/README.md`), and a session's end reaches the GBA as its partner
-  disconnecting. Restarting the board left a GBA leaving the trade room on a black screen, waiting for an event from an
+  board (the bridge's own restart without a reboot, which `pico_link_adapter_on_chip` turns on, see `../ldn/README.md`), and a
+  session's end reaches the GBA as its partner disconnecting. Restarting the board left a GBA leaving the trade room on a black screen, waiting for an event from an
   adapter that was gone.
 - With Ruby and Sapphire's cable (`CONFIG_UDS_RFU_CABLE`, `../cable`), the adapter holds SI high until the GBA first clocks
   it, instead of mirroring SO from the start (the ID exchange has no handshake), and while the game is unknown it tries the

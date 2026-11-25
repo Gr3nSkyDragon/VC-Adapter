@@ -60,6 +60,9 @@ bool pico_link_gba_active(void);
 /* Drop frames buffered before the host was listening. */
 void pico_link_reset_inbound(void);
 
+/* The adapter runs on this chip, so restarting the chip would take it from the GBA. */
+bool pico_link_adapter_on_chip(void);
+
 /* Reboot the Pico into its USB bootloader. */
 void pico_link_bootsel(void);
 

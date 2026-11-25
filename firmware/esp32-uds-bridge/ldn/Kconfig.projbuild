@@ -63,4 +63,21 @@ config BRIDGE_HOST_MAX_TX_POWER
         room. On boards with a weak supply that dips the voltage until the brownout
         detector resets the chip. The Switch sits within a metre or two, so 15 dBm is
         plenty.
+config BRIDGE_GBA_VCC_GPIO
+    int "GPIO sensing the link port's pin 1 through a divider (-1: none)"
+    range -1 48
+    default -1
+    help
+        Pin 1 of the GBA's link port is 3.3 V while a GBA game runs and 5 V with a Game Boy
+        or Game Boy Color cartridge. Wired through a divider to a GPIO with an ADC input, the
+        bridge prints LDN_GBA_VCC at boot and whenever pin 1 changes between off, 3.3 V and
+        5 V. On the original ESP32 use an ADC1 pin (GPIO 32-39): ADC2 does not work while
+        Wi-Fi runs.
+config BRIDGE_GBA_VCC_DIVIDER
+    int "Pin 1 voltage per volt at the GPIO, in thousandths"
+    range 1000 20000
+    default 2000
+    help
+        2000 for two equal resistors, such as 10 kilohm from pin 1 to the GPIO and 10 kilohm
+        from the GPIO to GND.
 endmenu

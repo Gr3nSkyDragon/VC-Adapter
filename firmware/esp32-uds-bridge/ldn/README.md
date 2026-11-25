@@ -1,9 +1,13 @@
 # GB-Link Switch LDN bridge (vendored)
 
 The Switch side of the merged firmware: GB-Link Switch LDN's ESP32 bridge firmware, `firmware/common/` of
-[GB-Link/GB-Link-Switch-LDN](https://github.com/GB-Link/GB-Link-Switch-LDN) at commit `8b47745` (bridge 2.1.5). It joins
-or hosts a Nintendo Switch local wireless (LDN) room and carries a GBA game's wireless-adapter traffic to it. See their
-`firmware/README.md` for what it does and its console commands.
+[GB-Link/GB-Link-Switch-LDN](https://github.com/GB-Link/GB-Link-Switch-LDN) at commit `8b47745` (bridge 2.1.5), with the
+`esp-adapter` work on top of it (copy of 2026-10-24): the Union Room both ways, battles, groups of more than two, the hosted
+room moving to where a Switch is heard, frames relayed between stations, the bridge starting over without a restart when
+the adapter is on the same chip, and the port's pin 1 read through a divider (`gba_vcc.c`). Their adapter itself
+(`esp-adapter/components/rfu_adapter`, the chip's SPI slave) is not used: this board keeps its own (`../rfu`). It joins or
+hosts a Nintendo Switch local wireless (LDN) room and carries a GBA game's wireless-adapter traffic to it. See their
+`firmware/README.md` and `esp-adapter/README.md` for what it does and its console commands.
 
 Licence: AGPL-3.0 (`LICENSE`); the LDN protocol components are GPL-3.0 (`LDN-GPL-3.0.txt`). The merged firmware that
 includes these files is distributed under the AGPL-3.0.
@@ -32,13 +36,11 @@ Kept as close to upstream as possible, so that a newer upstream can be copied ov
   and come from `rfu_adapter_read`, the link task runs on the first core (the second belongs to the adapter's link), and
   `pico_link_probe` / `pico_link_swap` leave the pins alone, and the inbound frame queue is 24 frames instead of 48 (the
   adapter's link code needs the internal RAM). Without the option the file builds as upstream's.
-- `pia_bridge.c`: with `CONFIG_UDS_RFU_KEEP_ADAPTER` (on by default with the emulated adapter), a finished session or failed
-  join no longer restarts the board, and a finished session no longer resets the adapter (mode re-entry): either would take
-  the adapter on this chip away from a GBA that may be waiting on it, as one leaving the trade room is (a hardware test
-  ended on a black screen that way). The bridge stops, tells the adapter its partner has left (`RFU1_DISCONNECT`, which
-  the GBA's link manager sees as a lost partner), and starts its room search again a second later. Hosting's radio is
-  stopped before the session's, so the room search gets its station back. Without the option it restarts the board as
-  upstream does.
+- `pico_link.c`: `pico_link_adapter_on_chip` answers true with the emulated adapter, so the bridge starts over without a
+  restart after a session or a failed join (their `restart_in_place`): a restart would take the adapter on this chip away
+  from a GBA that may be waiting on it, as one leaving the trade room is (a hardware test ended on a black screen that way).
+  Until the `esp-adapter` work brought that, the merge had its own version in `pia_bridge.c`; that file is now theirs,
+  unchanged.
 - `ldn_keys.c`: the keys are read from flash once and kept in RAM (`ldn_keys_store` and `ldn_keys_erase` keep that copy in
   step). With the adapter on the second core, interrupts masked, every flash read on the first waits for that core to let
   them in, and each key derivation (three reads) took about 200 ms. A room the GBA leads then answered a Switch's

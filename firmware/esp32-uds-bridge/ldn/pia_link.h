@@ -27,6 +27,8 @@ typedef struct
     pia_crypto_t crypto;
     pia_conn_t conn;
     pia_reliable_t reliable;
+    pia_pending_t reliable_pending[PIA_RELIABLE_SLOTS];
+    uint8_t reliable_data[PIA_RELIABLE_SLOTS][PIA_RELIABLE_PAYLOAD];
 
     char ours[16], host[16];
     pia_send_fn send;
@@ -56,6 +58,7 @@ typedef struct
     uint8_t connect_id[2];
 
     bool accepted, host_disconnected, connect_wanted;
+    uint8_t client_slot;   /* from the host's WA for this station; 0 is the first client */
     int received, decrypt_failures, sent, reordered, hold_dropped;
     int rx_seen, rx_wrong_source, rx_short, rx_bad_frame, rx_messages, rx_unzip_fail;
     int rx_body_max, rx_msgs_max;                  /* per-datagram maxima */
@@ -67,6 +70,7 @@ typedef struct
        checks; a dropped or reordered frame desyncs the trade. */
     struct { uint8_t data[PIA_OUT_BYTES]; uint16_t length; } outbound[PIA_OUT_SLOTS];
     int out_head, out_count, high_water, repeated, overflow;
+    int last_peer_probe;              /* tick of the last probe round to the other members */
     uint8_t last_enqueued[PIA_OUT_BYTES];
     uint16_t last_enqueued_len;
     uint8_t idle[PIA_OUT_BYTES];

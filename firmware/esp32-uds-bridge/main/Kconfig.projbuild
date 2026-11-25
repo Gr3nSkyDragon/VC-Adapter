@@ -127,17 +127,6 @@ config UDS_RFU_CABLE
         rfu-wrapper-air.c, unchanged). In progress: the wireless side builds and passes its PC test, but the cable master and
         the choice between the adapter and the cable are not written yet, so nothing runs it.
 
-config UDS_RFU_KEEP_ADAPTER
-    bool "Adapter: keep it up when the Switch side's session ends (restart the bridge in place)"
-    depends on UDS_RFU_ADAPTER
-    default y
-    help
-        GB-Link Switch LDN restarts the board after every session and failed join, and resets the adapter when a session ends;
-        with a GB-Link the Pico keeps answering the GBA meanwhile. Here the adapter is on this chip, so that would take it off the
-        GBA's link, and a GBA waiting on it for an event (as while it leaves the trade room) would wait for good. With this on,
-        the bridge stops and starts its room search again in place instead, the adapter keeps running, and a session's end
-        reaches the GBA as its partner disconnecting. Off: the board restarts as GB-Link Switch LDN does.
-
 config UDS_RFU_STATUS_LED_GPIO
     int "Status LED for the emulated adapter, active low (-1 for none)"
     depends on UDS_RFU_ADAPTER
@@ -187,15 +176,39 @@ config UDS_LINK_PORT_SD_GPIO
         pull, so it never drives the line.
 
 config UDS_LINK_PORT_SENSE_GPIO
-    int "ADC1 GPIO reading the port's VCC (pin 1) through a 1:2 divider, -1 for none"
+    int "GPIO reading the port's VCC (pin 1) through a 1:2 divider, -1 for none"
     depends on UDS_LINK_PORT
     range -1 48
     default -1
     help
-        Two equal resistors (100k each) from the port's VCC to GND, their middle to this pin (an ADC1 pin: GPIO1 to GPIO10 on the
-        ESP32-S3; the XIAO's D4 is GPIO5). With it the board knows whether a console is on the port and in GB/GBC mode (5 V) or
-        running a GBA game (3.3 V): it starts on its own only for a Game Boy, and stops when the console goes off. Without it the
-        board assumes a Game Boy is there.
+        Two equal resistors (10k each on the VC-Adapter board) from the port's VCC to GND, their middle to this pin. An ADC1 pin
+        (GPIO1 to GPIO10 on the ESP32-S3) is read in volts; any other pin (the XIAO's MTCK, GPIO39) as high or low, high taken as a
+        Game Boy's 5 V and low as a GBA game's 3.3 V (or nothing); the log's PORT_SENSE lines say which. With it the board knows
+        whether a console is in GB/GBC mode (5 V) or running a GBA game (3.3 V): it starts the 3DS side on its own only for a Game
+        Boy, and moves between 3DS and Switch mode by it (UDS_LINK_PORT_AUTO_MODE). Without it the board assumes a Game Boy is there
+        in 3DS mode and stays in whichever mode it is in.
+
+config UDS_LINK_PORT_AUTO_MODE
+    bool "Switch between 3DS mode and Switch LDN mode by the sense pin"
+    depends on UDS_LINK_PORT
+    default y
+    help
+        With the sense pin on the port's pin 1 (UDS_LINK_PORT_SENSE_GPIO): a Game Boy game (5 V) moves the board to 3DS mode, a
+        GBA game (3.3 V) to Switch LDN mode, once the reading has held for a second and no PC has sent anything for 5 seconds (a PC
+        picks the mode by what it speaks). Four switches in a row without the board settling in a mode for 30 seconds stop it until
+        the next power-up, so a reading that wavers cannot keep restarting the board.
+
+config UDS_LINK_PORT_SLEEP_S
+    int "Deep sleep after the console has been off this long with no PC on USB, in seconds (0: never)"
+    depends on UDS_LINK_PORT
+    range 0 3600
+    default 10
+    help
+        For a board with no chip-enable circuit (EN left to the XIAO's own pull-up), which runs whenever it has USB or battery power:
+        with every link line low (the console off) this long and no PC talking on USB, the board goes into deep sleep, and wakes
+        (restarts) when SC, SI or SD goes high again, as they do when the console is switched on. A board asleep on its battery
+        does not see a PC plugged in: press its reset button, or switch the console on. With the chip-enable circuit the board is
+        off with the console anyway.
 
 config UDS_LINK_PORT_CLOCK_HZ
     int "Link clock while a byte goes out, in Hz"

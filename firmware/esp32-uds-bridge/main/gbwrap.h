@@ -52,6 +52,9 @@ bool gbwrap_active(void);
 /* The host said HELLO: from now on the host has the board. A wrapper the board started on its own stops. */
 void gbwrap_host_hello(void);
 
+/* That host has been quiet a while (main.c): the board may start on its own again, unless the host's own wrapper still runs. */
+void gbwrap_host_gone(void);
+
 /* From the Wi-Fi task: a received frame ({channel, rssi, flags, mpdu}, as UDS_EVT_RX). Only queues. */
 bool gbwrap_sink_rx(const uint8_t *payload, size_t length);
 

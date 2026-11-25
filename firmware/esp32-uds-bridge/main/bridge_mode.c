@@ -1,5 +1,6 @@
 /* Copyright 2026 Gr3nSkyDragon. Licensed under GPLv3 or any later version. */
 #include "bridge_mode.h"
+#include "port_watch.h"
 
 #include "esp_attr.h"
 #include "esp_system.h"
@@ -144,6 +145,7 @@ void bridge_usb_sniff(const uint8_t *bytes, size_t length)
     static uint8_t encoded[16]; /* a HELLO is 11 bytes encoded */
     static size_t used;
     static bool overflow;
+    if (length) port_watch_note_host(); /* a PC is talking: it picks the mode, not the sense pin (port_watch.h) */
     for (size_t i = 0; i < length; ++i) {
         if (bytes[i] != 0) {
             if (used < sizeof(encoded)) encoded[used++] = bytes[i];

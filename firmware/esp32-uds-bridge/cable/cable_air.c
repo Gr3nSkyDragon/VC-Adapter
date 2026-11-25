@@ -358,7 +358,7 @@ static void _sendData(struct GBASIORFUBackend* backend, const uint8_t* data, siz
 }
 
 // mGBA's _handleRfu1, client role. A DISCONNECT for us also ends the link here: the bridge sends one when the Switch's
-// session ends (CONFIG_UDS_RFU_KEEP_ADAPTER), which mGBA's USB link never sees.
+// session ends and it starts over without a restart (the adapter is on this chip), which mGBA's USB link never sees.
 static void _handleRfu1(struct BridgeBackend* b, const uint8_t* rfu1, size_t length) {
 	if (!b->rfu) {
 		return;

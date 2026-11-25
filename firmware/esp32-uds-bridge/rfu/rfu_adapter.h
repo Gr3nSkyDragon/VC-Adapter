@@ -29,6 +29,10 @@ void rfu_adapter_write(const uint8_t *bytes, size_t length);
  * the adapter's half-second telemetry and the status LED, so it is called every millisecond or two. */
 size_t rfu_adapter_read(uint8_t *out, size_t capacity);
 
+/* Every link line has been low for half a second while the adapter is on the wire: the console is off, and the adapter has let go of
+ * its lines (main/port_watch.c sleeps on it). */
+bool rfu_adapter_lines_dead(void);
+
 /* CONFIG_UDS_RFU_CABLE: Ruby and Sapphire's cable (../cable). Hands `print` a summary line (which link the game uses, the
  * cable's state) and the cable's latest log lines, oldest first. From the bridge's side (LDN_CABLE_LOG). */
 void rfu_adapter_cable_log(void (*print)(const char *line));

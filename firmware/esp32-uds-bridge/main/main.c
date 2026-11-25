@@ -5,10 +5,12 @@
  * USB bridge (ldn/transport.h), with the framing in uds_wire.h; the board is a raw 802.11 radio for
  * Nintendo 3DS local wireless (UDS).
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -17,10 +19,12 @@
 #include "freertos/task.h"
 #include "board.h"
 #include "bridge_mode.h"
+#include "port_watch.h"
 #include "diag.h"
 #include "display.h"
 #include "gbwrap.h"
 #include "keys.h"
+#include "linkport.h"
 #include "radio.h"
 #include "transport.h" /* ldn/: the host link, shared with the Switch side */
 #include "uds_wire.h"
@@ -57,6 +61,7 @@ static SemaphoreHandle_t s_write_lock;
 static uint8_t *s_encoded;    /* UDS_WIRE_MAX_ENCODED */
 static uint8_t *s_event_item; /* 1 + UDS_WIRE_MAX_PAYLOAD */
 static volatile bool s_host_seen;
+static bool s_host_released; /* the host since the last HELLO has been quiet long enough, and the wrapper was told (main loop) */
 
 /* Serialized writer: the command task and the RX forwarder both send frames. */
 static void send_frame(uint8_t type, uint8_t seq, uint8_t flags, const uint8_t *payload,
@@ -240,6 +245,7 @@ static void handle_command(uds_wire_frame_t *frame)
     switch (frame->type) {
     case UDS_CMD_HELLO: {
         s_host_seen = true;
+        s_host_released = false;
         gbwrap_host_hello(); /* a wrapper the board started on its own (on its link port) gives the board to the host */
         display_wake();
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
@@ -284,6 +290,23 @@ static void handle_command(uds_wire_frame_t *frame)
 
 #if UDS_HAVE_LDN
 void ldn_app_main(void); /* ldn/ldn_probe.c: GB-Link Switch LDN's bridge; does not return */
+int ldn_wire_printf(const char *format, ...); /* ldn/ldn_wire.c: its console's text, whichever way the host reads it */
+#endif
+
+#if CONFIG_UDS_LINK_PORT
+/* port_watch's lines, in this mode's log (LOG frames to a host, diag.h). The aio line only: the board on the console's link port. */
+static int log_port(const char *format, ...)
+{
+    char line[160];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (n >= (int)sizeof(line)) n = (int)sizeof(line) - 1;
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    ESP_LOGI("port", "%s", line);
+    return n;
+}
 #endif
 
 void app_main(void)
@@ -292,6 +315,11 @@ void app_main(void)
     keys_init(); /* NVS, which also holds the boot mode */
 #if UDS_HAVE_LDN
     if (bridge_mode_get() == BRIDGE_MODE_LDN) {
+#if CONFIG_UDS_LINK_PORT
+        /* The link port's console: the mode by its pin 1, and sleep while it is off (port_watch.h). */
+        port_watch_start(BRIDGE_MODE_LDN, ldn_wire_printf);
+        port_watch_start_switch_side();
+#endif
         ldn_app_main();
         return;
     }
@@ -322,6 +350,9 @@ void app_main(void)
     diag_report("after radio_init"); /* what is left for Wi-Fi, on the smaller chips above all */
     gbwrap_init(gbwrap_send);
     display_start(display_status); /* optional: without a screen this does nothing */
+#if CONFIG_UDS_LINK_PORT
+    port_watch_start(BRIDGE_MODE_UDS, log_port);
+#endif
 
     xTaskCreate(rx_forward_task, "rx_fwd", 4096, NULL, 6, NULL);
     xTaskCreate(stats_task, "stats", 3072, NULL, 2, NULL);
@@ -329,8 +360,24 @@ void app_main(void)
     uds_wire_decoder_init(decoder);
     uint8_t chunk[256];
     int64_t last_frame_us = 0; /* when the last valid 3DS host frame came; 0: none since boot */
+#if CONFIG_UDS_LINK_PORT
+    int64_t next_watch_us = 0;
+#endif
     for (;;) {
         int count = bridge_transport_read_wait(chunk, sizeof(chunk), pdMS_TO_TICKS(20));
+#if CONFIG_UDS_LINK_PORT
+        if (count > 0) port_watch_note_host();
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_watch_us) {
+            next_watch_us = now_us + 250000;
+            /* A host that said HELLO and has since been quiet a while has let go: the board may start on its own again. */
+            if (s_host_seen && !s_host_released && port_watch_host_quiet()) {
+                s_host_released = true;
+                gbwrap_host_gone();
+            }
+            port_watch_poll(linkport_lines_low(), now_us);
+        }
+#endif
         if (count > 0 && (!last_frame_us || esp_timer_get_time() - last_frame_us >= MODE_WATCH_QUIET_US)) {
             bridge_mode_watch_uds(chunk, (size_t)count);
         }

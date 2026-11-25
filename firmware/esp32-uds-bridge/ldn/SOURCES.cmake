@@ -17,13 +17,14 @@ set(BRIDGE_SOURCES
     "${BRIDGE_COMMON}/pia_link.c"
     "${BRIDGE_COMMON}/pia_bridge.c"
     "${BRIDGE_COMMON}/pia_host.c"
-    "${BRIDGE_COMMON}/ldn_host.c")
+    "${BRIDGE_COMMON}/ldn_host.c"
+    "${BRIDGE_COMMON}/gba_vcc.c")
 # Console transport: native USB Serial/JTAG, or console UART behind a USB bridge.
 set(BRIDGE_TRANSPORT_USB "${BRIDGE_COMMON}/transport_usb_serial_jtag.c")
 set(BRIDGE_TRANSPORT_UART "${BRIDGE_COMMON}/transport_uart.c")
 set(BRIDGE_REQUIRES
     esp_event esp_netif esp_wifi esp_timer nvs_flash wpa_supplicant esp_hw_support
-    spi_flash lwip esp_driver_gpio esp_driver_uart mbedtls zstd)
+    spi_flash lwip esp_driver_gpio esp_driver_uart esp_adc mbedtls zstd)
 
 # The WPA callback table and key-install entry points are private ABI; each chip's Wi-Fi
 # driver binary is pinned. A different binary must be re-verified on hardware.

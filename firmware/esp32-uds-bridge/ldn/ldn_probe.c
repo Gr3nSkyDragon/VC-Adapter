@@ -26,9 +26,11 @@
 #include "pia_crypto.h"
 #include "esp_heap_caps.h"
 #include "ldn_session.h"
+#include "ldn_host.h"
 #include "transport.h"
 #include "ldn_udp.h"
 #include "ldn_wire.h"
+#include "gba_vcc.h"
 #define printf ldn_wire_printf
 static esp_netif_t *s_station_netif;
 
@@ -171,6 +173,44 @@ static void note_rssi(int8_t rssi)
     ++s_rssi_count;
 }
 
+/* Boards with an antenna switch: after boot, while the radio only listens, the two
+   antennas take turns and the one that hears the same senders better is kept. Any Wi-Fi
+   sender counts. A sender one antenna missed counts as heard at ANTENNA_UNHEARD there, so
+   an empty socket loses; it also hears too little to end the comparison early. */
+#define ANTENNA_TURN_US 125000
+#define ANTENNA_COMPARE_US 6000000
+#define ANTENNA_SENDERS 16
+#define ANTENNA_UNHEARD (-100)
+typedef struct { uint8_t mac[6]; int32_t sum[2]; uint16_t count[2]; } antenna_sender_t;
+static struct
+{
+    bool active, external;
+    int64_t started, next_turn;
+    int senders;
+    antenna_sender_t sender[ANTENNA_SENDERS];
+} s_antenna;
+
+static void antenna_note(const uint8_t source[6], int8_t rssi)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    if (s_antenna.active)
+    {
+        int i = 0;
+        while (i < s_antenna.senders && memcmp(s_antenna.sender[i].mac, source, 6) != 0) ++i;
+        if (i == s_antenna.senders && i < ANTENNA_SENDERS)
+        {
+            memcpy(s_antenna.sender[i].mac, source, 6);
+            ++s_antenna.senders;
+        }
+        if (i < s_antenna.senders)
+        {
+            s_antenna.sender[i].sum[s_antenna.external] += rssi;
+            ++s_antenna.sender[i].count[s_antenna.external];
+        }
+    }
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
 static void promiscuous_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
 {
     if (buffer == NULL) {
@@ -184,6 +224,7 @@ static void promiscuous_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
         ldn_control_sniff(frame, length);
     }
     if (type != WIFI_PKT_MGMT) return;
+    if (length >= 16) antenna_note(frame + 10, packet->rx_ctrl.rssi);
     remember_association(frame, length);
 
     /* Management type 0, action subtype 13, little-endian frame control. */
@@ -191,6 +232,25 @@ static void promiscuous_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
     if (length >= 29 && (frame[0] & 0xfcU) == 0xd0U) {
         remember_action(frame, frame + 24, length - 28, false, packet->rx_ctrl.channel, packet->rx_ctrl.rssi);
     }
+}
+
+/* The access point's own traffic belongs to the host, so only advertisements are taken. */
+static void advertisement_rx(void *buffer, wifi_promiscuous_pkt_type_t type)
+{
+    if (buffer == NULL || type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t *packet = buffer;
+    const uint8_t *frame = packet->payload;
+    const size_t length = packet->rx_ctrl.sig_len;
+    if (length >= 29 && (frame[0] & 0xfcU) == 0xd0U)
+        remember_action(frame, frame + 24, length - 28, false, packet->rx_ctrl.channel, packet->rx_ctrl.rssi);
+}
+
+void ldn_session_watch_advertisements(void)
+{
+    const wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(advertisement_rx);
+    esp_wifi_set_promiscuous(true);
 }
 
 static void enable_management_sniffer(void)
@@ -433,6 +493,83 @@ static void wifi_event(void *argument, esp_event_base_t base, int32_t id,
     }
 }
 
+static void antenna_decide(void)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_antenna.active = false;
+    portEXIT_CRITICAL(&s_stats_lock);
+    int heard = 0;
+    int32_t score[2] = {0, 0};
+    for (int i = 0; i < s_antenna.senders; ++i)
+    {
+        const antenna_sender_t *s = &s_antenna.sender[i];
+        if (s->count[0] + s->count[1] < 3) continue;
+        for (int a = 0; a < 2; ++a) score[a] += s->count[a] ? s->sum[a] / s->count[a] : ANTENNA_UNHEARD;
+        ++heard;
+    }
+    /* The external antenna has to be better by 1 dB on average to replace the onboard one. */
+    const bool external = heard && score[1] >= score[0] + heard;
+    bridge_board_antenna(external);
+    if (heard)
+        printf("LDN_ANTENNA auto %s: %d senders, external %d dBm, onboard %d dBm\n", external ? "external" : "onboard",
+               heard, (int)(score[1] / heard), (int)(score[0] / heard));
+    else
+        printf("LDN_ANTENNA auto onboard: nothing heard\n");
+}
+
+/* Enough to decide: a few senders heard several times through each antenna. */
+static bool antenna_enough(void)
+{
+    int both = 0;
+    portENTER_CRITICAL(&s_stats_lock);
+    for (int i = 0; i < s_antenna.senders; ++i)
+        if (s_antenna.sender[i].count[0] >= 3 && s_antenna.sender[i].count[1] >= 3) ++both;
+    portEXIT_CRITICAL(&s_stats_lock);
+    return both >= 3;
+}
+
+/* The comparison ends early once the radio joins or hosts a room: switching antennas then
+   would cost frames. */
+static void antenna_poll(int64_t now)
+{
+    if (!s_antenna.active) return;
+    if (s_joining || s_ssid[0] || ldn_host_running() || now - s_antenna.started >= ANTENNA_COMPARE_US)
+    {
+        antenna_decide();
+        return;
+    }
+    if (now < s_antenna.next_turn) return;
+    if (antenna_enough())
+    {
+        antenna_decide();
+        return;
+    }
+    s_antenna.next_turn = now + ANTENNA_TURN_US;
+    portENTER_CRITICAL(&s_stats_lock);
+    s_antenna.external = !s_antenna.external;
+    portEXIT_CRITICAL(&s_stats_lock);
+    bridge_board_antenna(s_antenna.external);
+}
+
+static void antenna_start(int64_t now)
+{
+    if (!bridge_board_antenna(false)) return;
+    portENTER_CRITICAL(&s_stats_lock);
+    memset(&s_antenna, 0, sizeof(s_antenna));
+    s_antenna.active = true;
+    portEXIT_CRITICAL(&s_stats_lock);
+    s_antenna.started = now;
+    s_antenna.next_turn = now + ANTENNA_TURN_US;
+}
+
+bool ldn_session_set_antenna(bool external)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_antenna.active = false;
+    portEXIT_CRITICAL(&s_stats_lock);
+    return bridge_board_antenna(external);
+}
+
 const char *ldn_session_ssid(void) { return s_ssid[0] ? s_ssid : "-"; }
 
 void ldn_session_stop(void)
@@ -517,6 +654,7 @@ static void run_private_join(void)
            (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     int64_t last_advertisement = 0;
+    antenna_start(esp_timer_get_time());
     for (;;) {
         ldn_control_poll();
         pia_bridge_poll();
@@ -529,6 +667,8 @@ static void run_private_join(void)
             ldn_session_stop(); printf("LDN_ERROR ASSOCIATION_TIMEOUT\n");
         }
         if (now - last_advertisement >= 250000) { export_advertisement(); last_advertisement = now; }
+        antenna_poll(now);
+        gba_vcc_poll(now);
         /* The GBA<->Switch protocol ticks every ~16.7 ms; keep this delay minimal. */
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -553,6 +693,7 @@ void ldn_app_main(void)
     bridge_board_init();
     /* Before anything else allocates: see pia_crypto_prepare. */
     pia_crypto_prepare();
+    gba_vcc_start();
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     uint32_t flash_bytes = 0;

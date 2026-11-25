@@ -81,6 +81,26 @@ static void net_ack(pia_conn_t *c, uint8_t type, const uint8_t *sequence, uint16
     if (o) { o->footer = false; o->establishing = true; o->packet = 0; }
 }
 
+/* The members listed in a single-fragment session update, other than the host and us.
+   Each station entry starts with its constant id (6 bytes and 00 00), its station id
+   and its local-link address (169.254.x.y). */
+static void read_peers(pia_conn_t *c, const uint8_t *p, size_t n)
+{
+    c->peer_count = 0;
+    for (size_t i = 23; i + 16 <= n && c->peer_count < PIA_PEERS; ++i)
+    {
+        if (p[i + 6] || p[i + 7] || p[i + 10] != 169 || p[i + 11] != 254) continue;
+        const uint16_t id = bin_b16(p + i + 8);
+        if (id && id != c->host_id && id != c->our_id)
+        {
+            pia_peer_t *e = &c->peers[c->peer_count++];
+            e->id = id;
+            snprintf(e->ip, sizeof(e->ip), "%u.%u.%u.%u", p[i + 10], p[i + 11], p[i + 12], p[i + 13]);
+        }
+        i += 15;
+    }
+}
+
 void pia_conn_feed(pia_conn_t *c, const pia_message_t *m, int tick)
 {
     const uint8_t *p = m->payload;
@@ -113,7 +133,7 @@ void pia_conn_feed(pia_conn_t *c, const pia_message_t *m, int tick)
             if (n > 0)
             {
                 pia_outbox_t *j = outbox_add(c, 13, join, (size_t)n, 0, c->our_id);
-                if (j) { j->compress = true; j->footer = false; j->establishing = true; j->packet = 0; }
+                if (j) { j->compress = true; j->footer = false; j->establishing = true; j->packet = 0; c->join_sent = true; }
             }
         }
         else if (request)
@@ -125,14 +145,24 @@ void pia_conn_feed(pia_conn_t *c, const pia_message_t *m, int tick)
             net_ack(c, (uint8_t)(type + 1), p + 4, c->our_id);
         }
     }
-    else if (m->protocol == 13 && m->length > 0)
+    /* In a room with other members the host's station list (to every station) can arrive
+       before its status request; only what follows our join request is ours. */
+    else if (m->protocol == 13 && m->length > 0 && c->join_sent)
     {
-        if (p[0] == 5 && c->host_id != 0 && c->state != 2)
+        /* Every session update (type 5) is acknowledged, repeats included: the host resends
+           one every 2 s until each station has, and a station that joins meanwhile gives up
+           after 30 s. The ack (type 6) is our constant id (MAC, 00 00), 00 00, then the
+           update's counter (bytes 1-2) and its sequence id (bytes 19-20, after the 4-byte
+           fragment header of a single-fragment update). */
+        if (p[0] == 5 && c->host_id != 0 && m->length >= 21 && p[3] == 1 && p[4] == 0)
         {
-            uint8_t reply[14] = {6};
+            read_peers(c, p, m->length);
+            uint8_t reply[15] = {6};
             memcpy(reply + 1, c->our_mac, 6);
-            memset(reply + 7, 0, 6);
-            reply[13] = 1;
+            reply[11] = p[1];
+            reply[12] = p[2];
+            reply[13] = p[19];
+            reply[14] = p[20];
             outbox_add(c, 13, reply, sizeof(reply), c->host_id, c->our_id);
         }
         if (c->state == 0) c->state = 1;

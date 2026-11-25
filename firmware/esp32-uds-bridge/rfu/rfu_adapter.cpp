@@ -298,6 +298,46 @@ static volatile uint32_t s_sdRiseAt;
 static inline uint32_t ccount() { return esp_cpu_get_cycle_count(); }
 static inline uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 static inline uint32_t rd() { return dedic_gpio_cpu_ll_read_in(); }
+
+// The console off: SC, SO and SD all low this long (the shifter's pull-ups to the port's VCC hold them high while it is on). This
+// side then lets go of SI and of its own pull-ups until a line is high again: on a board that stays powered (USB, its battery), a
+// high here goes through the shifter's MOSFETs (their body diodes) into the switched-off console's lines and from there into its
+// supply. SI driven high while the console was off kept a GBA partly powered.
+static constexpr uint32_t kLinesDeadMs = 500;
+static uint32_t s_linesLowSinceMs;  // every line low since (0: not now)
+static volatile bool s_linesLetGo;  // read on the other core (rfu_adapter_lines_dead)
+
+static void GLUE_IRAM letGoOfLines(bool letGo)
+{
+    s_linesLetGo = letGo;
+    if (letGo)
+    {
+        gpio_ll_output_disable(&GPIO, PIN_TX);
+        gpio_ll_pullup_dis(&GPIO, PIN_SC);
+        gpio_ll_pullup_dis(&GPIO, PIN_RX);
+    }
+    else
+    {
+        gpio_ll_pullup_en(&GPIO, PIN_SC);
+        gpio_ll_pullup_en(&GPIO, PIN_RX);
+        gpio_ll_output_enable(&GPIO, PIN_TX);
+    }
+}
+
+// Between words, with the GBA quiet (listen's idle path).
+static void GLUE_IRAM watchLines(uint32_t now)
+{
+    if (rd() & (s_scM | s_rxM | s_sdM))
+    {
+        s_linesLowSinceMs = 0;
+        if (s_linesLetGo) letGoOfLines(false);
+        return;
+    }
+    if (!s_linesLowSinceMs)
+        s_linesLowSinceMs = now ? now : 1;
+    else if (!s_linesLetGo && now - s_linesLowSinceMs >= kLinesDeadMs)
+        letGoOfLines(true);
+}
 static inline void tx(bool high) { dedic_gpio_cpu_ll_write_mask(s_txM, high ? s_txM : 0); }
 static inline void IRAM_ATTR spin(uint32_t cycles)
 {
@@ -1131,6 +1171,7 @@ static void GLUE_IRAM __attribute__((noinline)) session(uint32_t gen)
             const uint32_t now = nowMs();
             work(now, kWorkBytes);
             breathe(now);
+            watchLines(now);
 #if CONFIG_UDS_RFU_CABLE
             // The console off (every line low through the level shifter) ends the game: whatever comes next, another
             // cartridge included, is found afresh, as at power-up. Without this a board left on (USB, or the chip enable's USB
@@ -1587,6 +1628,11 @@ extern "C" void rfu_adapter_start(void)
 extern "C" void rfu_adapter_stop(void)
 {
     s_want.store(false, std::memory_order_release);
+}
+
+extern "C" bool rfu_adapter_lines_dead(void)
+{
+    return s_want.load(std::memory_order_acquire) && s_linesLetGo;
 }
 
 #if CONFIG_UDS_RFU_CABLE

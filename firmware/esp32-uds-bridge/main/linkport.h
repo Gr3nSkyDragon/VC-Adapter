@@ -36,8 +36,15 @@ enum linkport_power {
     LINKPORT_POWER_GB,      /* about 5 V: a GBA in GB/GBC mode, a GBC or a Game Boy */
 };
 
+/* Sets up the sense pin alone (linkport_init does it too): for Switch mode, where the emulated adapter has the link pins. An ADC1
+ * pin is read in volts; any other pin as high (a Game Boy's 5 V) or low (a GBA game, or nothing). Once; harmless without a sense pin. */
+void linkport_sense_start(void);
+
+/* How the sense pin is read, for the log ("GPIO39 read as high/low (it has no ADC channel)", "no sense pin", ...). */
+const char *linkport_sense_how(void);
+
 /* The port's VCC, read now (a few tens of microseconds). `millivolts` (may be NULL) gets the reading at the port, 0 without a sense
- * pin. */
+ * pin or with one read as high/low (then high is LINKPORT_POWER_GB, low LINKPORT_POWER_GBA, which may also mean nothing there). */
 enum linkport_power linkport_power(uint32_t *millivolts);
 
 /* Watches the clock line for a little more than one bit at 8192 Hz (125 us): true if it went low, which this board did not do, so the
@@ -50,5 +57,13 @@ uint8_t linkport_exchange(uint8_t out);
 
 /* Lets go of the clock and the data line (both idle high). */
 void linkport_release(void);
+
+/* The clock, this board's SI and SD all read low: with the console on, the shifter's pull-ups to the port's VCC hold the idle lines
+ * high, so all three low for a while means the console is off (or not there). False without the link port. */
+bool linkport_lines_low(void);
+
+/* This chip's own pull-ups on the clock and data lines, on (the default) or off. Off while the console is off: a high on this side
+ * goes through the shifter's MOSFETs (their body diodes) into the switched-off console's lines and from there into its supply. */
+void linkport_set_pulls(bool on);
 
 #endif

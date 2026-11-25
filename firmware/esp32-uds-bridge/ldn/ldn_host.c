@@ -233,6 +233,11 @@ static uint8_t s_host_rsn_ie[] = {
 
 typedef struct { ldn_host_member_t pub; int64_t assoc_ms; } host_station_t;
 typedef struct { uint16_t len; uint8_t bytes[HOST_FRAME_MAX]; } host_frame_t;
+/* A frame from one station to another, passed on as an AP does: the members of a room
+   probe each other. Theirs are small. The queue exists only while hosting. */
+#define HOST_RELAY_MAX 256
+#define HOST_RELAY_DEPTH 6
+typedef struct { uint16_t len; uint8_t bytes[HOST_RELAY_MAX]; } relay_frame_t;
 
 static struct
 {
@@ -250,12 +255,15 @@ static struct
     int station_count;
     size_t adv_len;
     int64_t next_adv;
+    int64_t away_until;             /* on another channel until then; 0 at home */
+    int64_t home_check;             /* when to confirm the radio is back on the room's channel */
     bool (*orig_ap_join)(ldn_wpa_station_join_param_t *);
     bool (*orig_ap_remove)(uint8_t *);
     uint8_t *(*orig_ap_get_wpa_ie)(size_t *);
     void (*joined)(const ldn_host_member_t *);
     void (*left)(const ldn_host_member_t *);
-    QueueHandle_t rx;
+    QueueHandle_t rx, relay;
+    uint32_t relayed;
     int64_t joined_ms, next_probe_ms;
 } s_host;
 
@@ -457,6 +465,20 @@ static void probe_arp(const host_station_t *st)
 static esp_err_t host_ap_rx(void *buffer, uint16_t length, void *eb)
 {
     const uint8_t *bytes = buffer;
+    if (length >= 14 && !(bytes[0] & 1) && memcmp(bytes, s_host.ap_mac, 6) != 0)
+    {
+        /* For another station: the poll loop checks it is one and sends it on. */
+        QueueHandle_t relay = s_host.relay;
+        if (length <= HOST_RELAY_MAX && relay)
+        {
+            relay_frame_t frame;
+            frame.len = length;
+            memcpy(frame.bytes, bytes, length);
+            xQueueSend(relay, &frame, 0);
+        }
+        esp_wifi_internal_free_rx_buffer(eb);
+        return ESP_OK;
+    }
     if (length >= 14 && bytes[12] == 0x88 && bytes[13] == 0xb7 && memcmp(bytes, s_host.ap_mac, 6) == 0)
     {
         if (length <= HOST_FRAME_MAX)
@@ -532,6 +554,36 @@ static void handle_auth(const uint8_t *src, const uint8_t *body, size_t n)
     }
 }
 
+static void relay_free(void)
+{
+    if (!s_host.relay) return;
+    QueueHandle_t q = s_host.relay;
+    s_host.relay = NULL;
+    vQueueDelete(q);
+}
+
+/* A start that fails once the radio was touched leaves it as ldn_host_stop does: our AP
+   hooks removed and the station mode set, so a later start or room search finds the
+   radio as it expects. */
+static bool host_start_failed(const char *what)
+{
+    printf("LDN_HOST_ERROR %s\n", what);
+    if (wpa_cb && s_host.orig_ap_join)
+    {
+        wpa_cb->wpa_ap_join = s_host.orig_ap_join;
+        wpa_cb->wpa_ap_remove = s_host.orig_ap_remove;
+        wpa_cb->wpa_ap_get_wpa_ie = s_host.orig_ap_get_wpa_ie;
+        s_host.orig_ap_join = NULL;
+        s_host.orig_ap_remove = NULL;
+        s_host.orig_ap_get_wpa_ie = NULL;
+    }
+    esp_wifi_stop();
+    relay_free();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    memset(s_host.ccmp_key, 0, sizeof(s_host.ccmp_key));
+    return false;
+}
+
 bool ldn_host_start(const ldn_host_config_t *cfg, ldn_host_scratch_t *scratch)
 {
     if (s_host.running) ldn_host_stop();
@@ -587,17 +639,19 @@ bool ldn_host_start(const ldn_host_config_t *cfg, ldn_host_scratch_t *scratch)
     esp_wifi_stop();
     esp_fill_random(s_host.ap_mac, 6);
     s_host.ap_mac[0] = (s_host.ap_mac[0] & 0xfc) | 2;
-    if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK) { printf("LDN_HOST_ERROR SET_MODE\n"); return false; }
-    if (esp_wifi_set_mac(WIFI_IF_AP, s_host.ap_mac) != ESP_OK) { printf("LDN_HOST_ERROR SET_MAC\n"); return false; }
+    if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK) return host_start_failed("SET_MODE");
+    if (esp_wifi_set_mac(WIFI_IF_AP, s_host.ap_mac) != ESP_OK) return host_start_failed("SET_MAC");
 
     if (!s_host.ap_netif)
     {
         s_host.ap_netif = esp_netif_create_default_wifi_ap();
-        if (!s_host.ap_netif) { printf("LDN_HOST_ERROR NETIF\n"); return false; }
+        if (!s_host.ap_netif) return host_start_failed("NETIF");
     }
     if (!s_host.rx) s_host.rx = xQueueCreate(3, sizeof(host_frame_t));
-    if (!s_host.rx) { printf("LDN_HOST_ERROR NO_MEMORY\n"); return false; }
+    if (!s_host.relay) s_host.relay = xQueueCreate(HOST_RELAY_DEPTH, sizeof(relay_frame_t));
+    if (!s_host.rx || !s_host.relay) return host_start_failed("NO_MEMORY");
     xQueueReset(s_host.rx);
+    s_host.relayed = 0;
     portENTER_CRITICAL(&s_lock);
     s_join_n = s_leave_n = 0;
     portEXIT_CRITICAL(&s_lock);
@@ -616,7 +670,7 @@ bool ldn_host_start(const ldn_host_config_t *cfg, ldn_host_scratch_t *scratch)
     config.ap.ssid_hidden = 1;                    /* as a Switch's beacons */
     config.ap.pmf_cfg.capable = false;
     config.ap.pmf_cfg.required = false;
-    if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK) { printf("LDN_HOST_ERROR CONFIG\n"); return false; }
+    if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK) return host_start_failed("CONFIG");
     /* 802.11b/g as a Switch: no HT elements. */
     esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
     /* Hooked before esp_wifi_start, which reads the RSN element. */
@@ -629,7 +683,7 @@ bool ldn_host_start(const ldn_host_config_t *cfg, ldn_host_scratch_t *scratch)
         wpa_cb->wpa_ap_remove = host_ap_remove;
         wpa_cb->wpa_ap_get_wpa_ie = host_ap_get_wpa_ie;
     }
-    if (esp_wifi_start() != ESP_OK) { printf("LDN_HOST_ERROR START\n"); return false; }
+    if (esp_wifi_start() != ESP_OK) return host_start_failed("START");
     bridge_wifi_tx_power();
 #if CONFIG_BRIDGE_HOST_MAX_TX_POWER
     int8_t power = 0;
@@ -675,6 +729,7 @@ void ldn_host_stop(void)
     }
     ldn_udp_stop();
     esp_wifi_stop();
+    relay_free();
     esp_wifi_set_mode(WIFI_MODE_STA);   /* back to station mode for the joiner */
     s_host.running = false;
     s_host.station_count = 0;
@@ -700,9 +755,39 @@ void ldn_host_poll(void)
     host_frame_t frame;
     while (xQueueReceive(s_host.rx, &frame, 0) == pdTRUE)
         handle_auth(frame.bytes + 6, frame.bytes + 14, frame.len - 14);
+    relay_frame_t relay;
+    while (xQueueReceive(s_host.relay, &relay, 0) == pdTRUE)
+    {
+        const int slot = find_station(relay.bytes);
+        if (slot >= 0 && s_host.stations[slot].pub.authenticated &&
+            esp_wifi_internal_tx(WIFI_IF_AP, relay.bytes, relay.len) == 0)
+            ++s_host.relayed;
+    }
 
     int64_t now_us = esp_timer_get_time();
-    if (now_us >= s_host.next_adv) { send_advertisement(); s_host.next_adv = now_us + 100000; }
+    if (s_host.away_until && now_us >= s_host.away_until)
+    {
+        s_host.away_until = 0;
+        esp_wifi_set_channel((uint8_t)s_host.channel, WIFI_SECOND_CHAN_NONE);
+        s_host.home_check = now_us + 20000;
+    }
+    else if (s_host.home_check && now_us >= s_host.home_check)
+    {
+        s_host.home_check = 0;
+        uint8_t primary = 0;
+        wifi_second_chan_t second;
+        if (esp_wifi_get_channel(&primary, &second) != ESP_OK || primary != s_host.channel)
+        {
+            printf("LDN_HOST_ERROR RETURN ch=%u room=%d\n", (unsigned)primary, s_host.channel);
+            esp_wifi_set_channel((uint8_t)s_host.channel, WIFI_SECOND_CHAN_NONE);
+        }
+    }
+    /* An advertisement sent from another channel would name this one. */
+    if (now_us >= s_host.next_adv && !s_host.away_until)
+    {
+        send_advertisement();
+        s_host.next_adv = now_us + 100000;
+    }
 
     int64_t now = now_ms();
     /* Repeated after a join in case a copy is lost. */
@@ -733,7 +818,19 @@ void ldn_host_set_app_data(const uint8_t *data, int length)
     if (s_host.running) reencode();
 }
 
+/* The access point itself moves: with no station joined the driver allows a channel change,
+   and the sniffer follows the radio. ldn_host_poll brings it back. */
+int ldn_host_listen_away(unsigned channel, unsigned ms)
+{
+    if (channel < 1 || channel > 11) return ESP_ERR_INVALID_ARG;
+    if (!s_host.running || s_host.station_count || s_host.away_until) return ESP_ERR_INVALID_STATE;
+    const esp_err_t error = esp_wifi_set_channel((uint8_t)channel, WIFI_SECOND_CHAN_NONE);
+    if (error == ESP_OK) s_host.away_until = esp_timer_get_time() + (int64_t)ms * 1000;
+    return error;
+}
+
 int ldn_host_member_count(void) { return s_host.station_count; }
+uint32_t ldn_host_relayed(void) { return s_host.relayed; }
 
 const ldn_host_member_t *ldn_host_member(int i)
 {

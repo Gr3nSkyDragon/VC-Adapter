@@ -92,6 +92,7 @@ struct request {
 };
 /* Requests of the board's own, beside the host's commands (uds_wire.h). */
 #define GBWRAP_REQ_HOST 0xF1 /* a host said HELLO */
+#define GBWRAP_REQ_HOST_GONE 0xF2 /* that host has been quiet a while */
 
 static gbwrap_send_t s_send;
 static QueueHandle_t s_queue;
@@ -768,10 +769,14 @@ static void pico_poll(void)
  * clock line is watched for one bit: a cartridge that clocks a byte itself (choosing roles, it may try to be the master) is left to
  * finish. A line low for longer is stuck (nothing on the port, or a console switched off) and is clocked anyway: between bytes the
  * lines are open drain, and they are driven both ways only for the tens of microseconds of a byte. With a sense pin the port's VCC is watched too: no
- * console, or a GBA game (3.3 V), and nothing is clocked; on its own the board stops when the console has been gone a while. */
+ * console, or a GBA game (3.3 V), and nothing is clocked; on its own the board stops when the console has been gone a while.
+ * Without one, every line low for half a second says the same (PORT_LINES_DEAD_US): the shifter's pull-ups to the port's VCC hold them
+ * high while the console is on. Then nothing is clocked and this chip's pull-ups are let go: on a board that stays powered (USB, its
+ * battery) a high on this side goes through the shifter into the switched-off console's lines and powers it a little. */
 #define PORT_BUSY_STUCK_US 20000
 #define PORT_POWER_EVERY_US 250000
 #define PORT_POWER_GONE_US 3000000
+#define PORT_LINES_DEAD_US 500000
 
 static struct {
     int64_t busy_since_us;  /* the clock line was found low (0: it was not) */
@@ -779,7 +784,31 @@ static struct {
     int64_t power_us;       /* when the VCC was last read */
     int64_t power_lost_us;  /* since when no Game Boy has been there (0: one is) */
     uint8_t power;          /* enum linkport_power, last read */
+    int64_t lines_low_us;   /* since when every line has read low (0: one is high) */
+    bool dead;              /* lines low PORT_LINES_DEAD_US: the console is off, the pull-ups let go */
 } s_port;
+
+/* Every line low for PORT_LINES_DEAD_US: the console is off. Lets go of this chip's pull-ups then, and takes them back as soon as a line
+ * is high again. */
+static bool port_lines_dead(int64_t now_us)
+{
+    if (!linkport_lines_low()) {
+        s_port.lines_low_us = 0;
+        if (s_port.dead) {
+            s_port.dead = false;
+            linkport_set_pulls(true);
+            logf_host("port: the console's lines are back");
+        }
+        return false;
+    }
+    if (!s_port.lines_low_us) s_port.lines_low_us = now_us;
+    if (!s_port.dead && now_us - s_port.lines_low_us >= PORT_LINES_DEAD_US) {
+        s_port.dead = true;
+        linkport_set_pulls(false);
+        logf_host("port: every line low: the console is off, the lines are let go");
+    }
+    return s_port.dead;
+}
 
 static const char *power_text(enum linkport_power power)
 {
@@ -804,7 +833,7 @@ static bool port_watch_power(int64_t now_us)
             logf_host("port: %s (%lu mV)", power_text(power), (unsigned long)mv);
         }
     }
-    const bool present = s_port.power == LINKPORT_POWER_GB || s_port.power == LINKPORT_POWER_UNKNOWN;
+    const bool present = (s_port.power == LINKPORT_POWER_GB || s_port.power == LINKPORT_POWER_UNKNOWN) && !port_lines_dead(now_us);
     if (present) {
         s_port.power_lost_us = 0;
     } else if (!s_port.power_lost_us) {
@@ -1107,6 +1136,8 @@ static void probe_port(void)
 {
     if (!linkport_enabled()) return;
     const enum linkport_power power = linkport_power(NULL);
+    /* Not on a port whose lines are all low: no console there (or one switched off), which no sense pin would say. */
+    if (port_lines_dead(esp_timer_get_time()) || linkport_lines_low()) return;
     if (power == LINKPORT_POWER_GB || power == LINKPORT_POWER_UNKNOWN) start_standalone();
 }
 
@@ -1147,9 +1178,14 @@ static void handle(const struct request *request)
         pico_receive(request);
         break;
     case GBWRAP_REQ_HOST:
-        /* A host has the board from now on: a wrapper running on its own stops, and none starts until the board restarts. */
+        /* A host has the board from now on: a wrapper running on its own stops, and none starts until that host lets go. */
         s_host_claimed = true;
         if (s_active && !s_host) stop_wrapper();
+        break;
+    case GBWRAP_REQ_HOST_GONE:
+        /* The host that said HELLO has been quiet a while (main.c): a setup tool that stored the keys and closed the port. The board
+         * may start on its own again, as at power-up, unless that host's own wrapper is still running. */
+        if (!(s_active && s_host)) s_host_claimed = false;
         break;
     case UDS_CMD_GB_STOP:
     case UDS_CMD_STOP:
@@ -1197,6 +1233,11 @@ void gbwrap_init(gbwrap_send_t send)
 void gbwrap_host_hello(void)
 {
     gbwrap_request(GBWRAP_REQ_HOST, 0, NULL, 0);
+}
+
+void gbwrap_host_gone(void)
+{
+    gbwrap_request(GBWRAP_REQ_HOST_GONE, 0, NULL, 0);
 }
 
 void gbwrap_request(uint8_t type, uint8_t seq, const uint8_t *payload, size_t length)
