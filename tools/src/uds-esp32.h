@@ -59,6 +59,7 @@ enum UDSEsp32Command {
 	// Firmware with UDS_ESP32_FEATURE_NIFI_HOST: the board as a DS host, an experiment (udsEsp32NifiHost, udsEsp32NifiPoll).
 	UDS_ESP32_CMD_NIFI_HOST = 0x21,
 	UDS_ESP32_CMD_NIFI_POLL = 0x22,
+	UDS_ESP32_CMD_NIFI_CMD = 0x23,
 };
 
 enum UDSEsp32Event {
@@ -270,6 +271,9 @@ struct UDSEsp32NifiPoll {
 	uint16_t ackDelayUs, ackCount;
 };
 bool udsEsp32NifiPoll(struct UDSEsp32* esp, const struct UDSEsp32NifiPoll* poll, const uint8_t* payload, size_t length);
+// The host's own CMD frame (no FCS), sent at once, then the board's MP ACK (`ackMode`, `ackDelayUs` after the CMD's transmit-done,
+// `ackCount`). No Status unless it is refused; nifiTx reports both frames.
+bool udsEsp32NifiCmd(struct UDSEsp32* esp, uint8_t ackMode, uint16_t ackDelayUs, uint16_t ackCount, const uint8_t* mpdu, size_t length);
 bool udsEsp32HasNifiHost(const struct UDSEsp32* esp);
 bool udsEsp32SendHello(struct UDSEsp32* esp); // one Hello; the answer arrives through udsEsp32Poll (info.valid)
 bool udsEsp32Stop(struct UDSEsp32* esp);

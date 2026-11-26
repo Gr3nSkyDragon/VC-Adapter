@@ -13,6 +13,8 @@
 #define DONE_WAIT_US 3000
 #define NOTIFY_TICK 0x01
 #define NOTIFY_DONE 0x02
+#define NOTIFY_CMD 0x04
+#define CMD_HEADER 5 /* ack_mode, ack_delay, ack_count */
 
 static const uint8_t kMpCmd[6] = {0x03, 0x09, 0xBF, 0x00, 0x00, 0x00};
 static const uint8_t kMpAck[6] = {0x03, 0x09, 0xBF, 0x00, 0x00, 0x03};
@@ -39,6 +41,17 @@ static volatile int64_t s_cmd_done_us, s_ack_done_us;
 static volatile uint32_t s_reply_us;
 static volatile bool s_waiting_reply;
 static uint8_t s_frame[24 + 4 + MAX_PAYLOAD];
+/* NIFI_CMD's frame, waiting for the task (under s_lock). */
+/* NIFI_CMDs waiting for the task (under s_lock): a few, as the next can come while one is on the air. */
+#define CMD_QUEUE 4
+typedef struct {
+    uint8_t frame[24 + 4 + MAX_PAYLOAD];
+    size_t length;
+    uint8_t mode;
+    uint16_t delay, count;
+} queued_cmd_t;
+static queued_cmd_t s_cmds[CMD_QUEUE];
+static unsigned s_cmd_head, s_cmd_count_queued;
 
 static bool mac_equal(const uint8_t *a, const uint8_t *b) { return memcmp(a, b, 6) == 0; }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -83,16 +96,10 @@ static int64_t wait_done(volatile int64_t *done, int64_t queued)
     return *done;
 }
 
-static void poll_once(void)
+/* One CMD (already in s_frame, `n` bytes) and its MP ACK. `ack_sequence` 0xFFFF: the board's own counter. */
+static void exchange(size_t n, uint16_t client_mask, uint8_t ack_mode, uint16_t ack_delay_us, uint16_t ack_count, uint16_t ack_sequence)
 {
-    const poll_t *p = &s_poll;
-    /* The CMD. */
-    size_t n = header(s_frame, 0x0228, p->duration, kMpCmd);
-    const uint16_t cmd_sequence = (uint16_t)(s_sequence - 1);
-    put16(s_frame + n, p->reply_time_us);
-    put16(s_frame + n + 2, p->client_mask);
-    memcpy(s_frame + n + 4, p->payload, p->payload_length);
-    n += 4 + p->payload_length;
+    const uint16_t cmd_sequence = (uint16_t)(le16(s_frame + 22) >> 4);
     s_cmd_done_us = 0;
     s_ack_done_us = 0;
     s_reply_us = 0;
@@ -102,14 +109,14 @@ static void poll_once(void)
     const esp_err_t cmd_result = radio_tx_nifi(s_frame, n);
     const int64_t cmd_done = cmd_result == ESP_OK ? wait_done(&s_cmd_done_us, cmd_queued) : 0;
 
-    const uint8_t mode = p->ack_mode & ~UDS_NIFI_ACK_OPTIMISTIC;
+    const uint8_t mode = ack_mode & ~UDS_NIFI_ACK_OPTIMISTIC;
     if (mode == UDS_NIFI_ACK_NONE) {
         s_waiting_reply = false;
         report(UDS_NIFI_TX_CMD, cmd_result, cmd_sequence, cmd_queued, cmd_done, s_reply_us, 0);
         return;
     }
     /* The ACK: after the delay, or (ACK_REPLY) as soon as a reply is heard. Busy-waiting: a tick is a millisecond. */
-    const int64_t target = (cmd_done ? cmd_done : cmd_queued) + p->ack_delay_us;
+    const int64_t target = (cmd_done ? cmd_done : cmd_queued) + ack_delay_us;
     while (esp_timer_get_time() < target) {
         if (mode == UDS_NIFI_ACK_REPLY && s_reply_us) break;
     }
@@ -118,17 +125,56 @@ static void poll_once(void)
     /* OPTIMISTIC: every client heard. An ACK early enough to land just after the reply slot goes before the board has heard the
      * reply (its capture callback comes a few hundred microseconds after), and a client told it was missed sends the same reply
      * again. */
-    const uint16_t fail = (reply || (p->ack_mode & UDS_NIFI_ACK_OPTIMISTIC)) ? 0 : p->client_mask;
+    const uint16_t fail = (reply || (ack_mode & UDS_NIFI_ACK_OPTIMISTIC)) ? 0 : client_mask;
     n = header(s_frame, 0x0218, 0, kMpAck);
-    const uint16_t ack_sequence = (uint16_t)(s_sequence - 1);
-    put16(s_frame + n, p->ack_count);
+    if (ack_sequence != 0xFFFF) put16(s_frame + 22, (uint16_t)((ack_sequence & 0x0FFF) << 4));
+    const uint16_t sent_sequence = (uint16_t)(le16(s_frame + 22) >> 4);
+    put16(s_frame + n, ack_count);
     put16(s_frame + n + 2, fail);
     n += 4;
     const int64_t ack_queued = esp_timer_get_time();
     const esp_err_t ack_result = radio_tx_nifi(s_frame, n);
-    const int64_t ack_done = ack_result == ESP_OK ? wait_done(&s_ack_done_us, ack_queued) : 0;
+    /* The CMD's report first, at once: a host waiting for its outcome (ESP32MP's RecvReplies) need not wait out the ACK. */
     report(UDS_NIFI_TX_CMD, cmd_result, cmd_sequence, cmd_queued, cmd_done, reply, 0);
-    report(UDS_NIFI_TX_ACK, ack_result, ack_sequence, ack_queued, ack_done, reply, fail);
+    const int64_t ack_done = ack_result == ESP_OK ? wait_done(&s_ack_done_us, ack_queued) : 0;
+    report(UDS_NIFI_TX_ACK, ack_result, sent_sequence, ack_queued, ack_done, reply, fail);
+}
+
+static void poll_once(void)
+{
+    const poll_t *p = &s_poll;
+    size_t n = header(s_frame, 0x0228, p->duration, kMpCmd);
+    put16(s_frame + n, p->reply_time_us);
+    put16(s_frame + n + 2, p->client_mask);
+    memcpy(s_frame + n + 4, p->payload, p->payload_length);
+    n += 4 + p->payload_length;
+    exchange(n, p->client_mask, p->ack_mode, p->ack_delay_us, p->ack_count, 0xFFFF);
+}
+
+/* NIFI_CMD: the host's own CMD frame (melonDS's), sent as it is; the ACK takes the sequence number after the CMD's, from the
+ * board's MAC. */
+static bool cmd_once(void)
+{
+    size_t n;
+    uint8_t mode;
+    uint16_t delay, count;
+    taskENTER_CRITICAL(&s_lock);
+    if (!s_cmd_count_queued) {
+        taskEXIT_CRITICAL(&s_lock);
+        return false;
+    }
+    const queued_cmd_t *c = &s_cmds[s_cmd_head];
+    n = c->length;
+    memcpy(s_frame, c->frame, n);
+    mode = c->mode;
+    delay = c->delay;
+    count = c->count;
+    s_cmd_head = (s_cmd_head + 1) % CMD_QUEUE;
+    --s_cmd_count_queued;
+    taskEXIT_CRITICAL(&s_lock);
+    const uint16_t mask = n >= 28 ? le16(s_frame + 26) : 0;
+    exchange(n, mask, mode, delay, count, (uint16_t)(((le16(s_frame + 22) >> 4) + 1) & 0x0FFF));
+    return true;
 }
 
 static void host_task(void *unused)
@@ -136,7 +182,11 @@ static void host_task(void *unused)
     (void)unused;
     for (;;) {
         uint32_t bits = 0;
-        xTaskNotifyWait(0, NOTIFY_TICK, &bits, portMAX_DELAY);
+        xTaskNotifyWait(0, NOTIFY_TICK | NOTIFY_CMD, &bits, portMAX_DELAY);
+        if (bits & NOTIFY_CMD) {
+            while (radio_running() && cmd_once()) {
+            }
+        }
         if (!(bits & NOTIFY_TICK)) continue;
         if (s_next_pending) {
             taskENTER_CRITICAL(&s_lock);
@@ -195,6 +245,28 @@ esp_err_t nifi_host_poll(const uint8_t *p, size_t length)
     taskEXIT_CRITICAL(&s_lock);
     s_active = true;
     return esp_timer_start_periodic(s_timer, interval);
+}
+
+esp_err_t nifi_host_cmd(const uint8_t *p, size_t length)
+{
+    if (length < CMD_HEADER + 28 || length - CMD_HEADER > sizeof(s_cmds[0].frame)) return ESP_ERR_INVALID_SIZE;
+    if ((p[0] & ~UDS_NIFI_ACK_OPTIMISTIC) > UDS_NIFI_ACK_REPLY) return ESP_ERR_INVALID_ARG;
+    if (!radio_running()) return ESP_ERR_INVALID_STATE;
+    taskENTER_CRITICAL(&s_lock);
+    if (s_cmd_count_queued == CMD_QUEUE) {
+        taskEXIT_CRITICAL(&s_lock);
+        return ESP_ERR_NO_MEM; /* the host is far ahead of the air: refused, so it knows this CMD did not go */
+    }
+    queued_cmd_t *c = &s_cmds[(s_cmd_head + s_cmd_count_queued) % CMD_QUEUE];
+    c->mode = p[0];
+    c->delay = le16(p + 1);
+    c->count = le16(p + 3);
+    c->length = length - CMD_HEADER;
+    memcpy(c->frame, p + CMD_HEADER, c->length);
+    ++s_cmd_count_queued;
+    taskEXIT_CRITICAL(&s_lock);
+    if (s_task) xTaskNotify(s_task, NOTIFY_CMD, eSetBits);
+    return ESP_OK;
 }
 
 void nifi_host_stop(void)

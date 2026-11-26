@@ -67,6 +67,9 @@
 #define UDS_NIFI_ACK_FIXED 1     /* the ACK ack_delay_us after the CMD's transmit-done callback */
 #define UDS_NIFI_ACK_REPLY 2     /* as soon as a reply is heard, or ack_delay_us after the CMD's transmit-done without one */
 #define UDS_NIFI_ACK_OPTIMISTIC 0x80 /* with FIXED or REPLY: the ACK reports every client heard, whether or not its reply was */
+/* The host's own CMD (melonDS's), sent at once, then the board's MP ACK as NIFI_POLL's would be (its sequence number the CMD's
+ * plus one). No STATUS when it is taken: NIFI_TX reports both frames; a refused one answers with STATUS. */
+#define UDS_CMD_NIFI_CMD 0x23    /* {ack_mode:u8, ack_delay_us:u16, ack_count:u16, mpdu (no FCS)...} */
 
 /* Device -> host. */
 #define UDS_EVT_HELLO_ACK 0x81 /* {proto:u8, fw_major:u8, fw_minor:u8, factory_mac[6]}, 1.8 on + {features:u8} */

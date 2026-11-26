@@ -388,6 +388,7 @@ DS will be the board's client and where the board's MP ACK has to land (`main/ni
 | --- | --- | --- |
 | `0x21` NIFI_HOST | `channel:u8, flags:u8 (NIFI_START's; bit 2: decoy hardware MAC), mac[6], beacon_interval_tu:u16` | STATUS. NiFi capture as NIFI_START, owning `mac`, and SET_BEACON's template every interval at 2 Mbps, short preamble (TX_FRAME at rate 4 is too) |
 | `0x22` NIFI_POLL | `interval_us:u32 (0 stops), reply_time_us:u16, client_mask:u16, duration:u16, ack_mode:u8, ack_delay_us:u16, ack_count:u16, payload...` | STATUS. A CMD every interval (its body: reply time, client mask, payload), then the MP ACK: none (0), `ack_delay_us` after the CMD's transmit-done (1), or as soon as a reply is heard, else after the delay (2); bit 7 (`UDS_NIFI_ACK_OPTIMISTIC`): the ACK reports every client heard |
+| `0x23` NIFI_CMD | `ack_mode:u8, ack_delay_us:u16, ack_count:u16, mpdu...` (a CMD frame, no FCS) | None unless refused (then STATUS). The host's own CMD (melonDS's), sent at once, then the board's MP ACK as NIFI_POLL's, its sequence number the CMD's plus one |
 
 `0xA1` NIFI_TX, per CMD and ACK: `kind:u8 (1 CMD, 2 ACK), result:u8, seq:u16, queued_us:u32, done_us:u32, reply_us:u32,
 client_fail:u16`, in the board's `esp_timer` microseconds (as NIFI_RX's `callback_us`). The polling runs in a task on the second
@@ -422,6 +423,23 @@ What the host test showed (2026-11-25, ESP32-S3: the trade capture's client DS, 
   has to be queued. So the ACK's bitmask is a choice, `UDS_NIFI_ACK_OPTIMISTIC` (every client heard: a reply the board really
   missed, 2 to 8% here, is lost) or not (every client missed until a later exchange: nothing lost, every message sent twice).
   Which one a real session gets through with is for the melonDS bridge to find out, with real game data both ways.
+
+### melonDS hosting a retail DS through the board (2026-11-26: a full Gen 4 trade)
+
+melonDS_Nifi's `src/net/ESP32MP` drives the host mode: melonDS hosts, the retail DS joins. Its beacons go out through TX_FRAME as
+melonDS sends them (a DS in the Union Room hosts in bursts of about six beacons between scans of the other channels, so a board
+beaconing on its own advertised a room melonDS was not in); a change of channel is SET_CHANNEL. Its CMDs go out as NIFI_CMD (a
+queue of 4 here), each followed by the board's MP ACK as soon as the reply is heard (`UDS_NIFI_ACK_REPLY`, a 2 ms fallback), with
+the true missed-clients bitmask, as pictochat-host's ESP32 modem does. The board reports each CMD (NIFI_TX) once its ACK is
+queued, and counts a reply as heard only once the reply is queued for the host, so the reply always reaches melonDS ahead of the
+report: before that, an ACK could tell the DS its reply had arrived while melonDS, getting the report first, dropped it, and a
+trade stalled at "Communicating".
+
+The first full trade (Platinum and HeartGold, the retail DS the client): 14,313 CMDs over about 112 s, every one reported, none
+refused; SendCmd to the report 3.6 ms on average (8.7 at most). The board and melonDS agreed on every reply but 22, which melonDS
+got after the board's ACK had already called them missed (the DS sent them again). melonDS polled about 120 times a second where
+the DS answered 60, once a frame: its emulated host seems to send a CMD again before the DS has its next answer, which is still
+to be looked at, along with more than one client (the board's ACK waits for the first reply only).
 
 ## Status: what has and has not been verified
 

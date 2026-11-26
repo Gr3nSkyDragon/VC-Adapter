@@ -453,6 +453,20 @@ bool udsEsp32NifiPoll(struct UDSEsp32* esp, const struct UDSEsp32NifiPoll* poll,
 	return _send(esp, UDS_ESP32_CMD_NIFI_POLL, 0, payload, 15 + length);
 }
 
+bool udsEsp32NifiCmd(struct UDSEsp32* esp, uint8_t ackMode, uint16_t ackDelayUs, uint16_t ackCount, const uint8_t* mpdu, size_t length) {
+	uint8_t payload[5 + 24 + 4 + 512];
+	if (length < 28 || length > sizeof(payload) - 5) {
+		return false;
+	}
+	payload[0] = ackMode;
+	payload[1] = (uint8_t) ackDelayUs;
+	payload[2] = (uint8_t) (ackDelayUs >> 8);
+	payload[3] = (uint8_t) ackCount;
+	payload[4] = (uint8_t) (ackCount >> 8);
+	memcpy(&payload[5], mpdu, length);
+	return _send(esp, UDS_ESP32_CMD_NIFI_CMD, 0, payload, 5 + length);
+}
+
 bool udsEsp32HasNifiHost(const struct UDSEsp32* esp) {
 	return esp->info.valid && (esp->info.features & UDS_ESP32_FEATURE_NIFI_HOST);
 }

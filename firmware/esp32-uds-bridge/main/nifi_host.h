@@ -22,6 +22,8 @@
 esp_err_t nifi_host_init(uds_event_sink_t sink);
 /* NIFI_POLL's payload (uds_wire.h). interval_us 0 stops the polling. */
 esp_err_t nifi_host_poll(const uint8_t *payload, size_t length);
+/* NIFI_CMD's payload: a CMD frame from the host (melonDS), sent now, then its ACK. No STATUS: NIFI_TX reports it. */
+esp_err_t nifi_host_cmd(const uint8_t *payload, size_t length);
 void nifi_host_stop(void);
 
 /* From radio.c's transmit-done callback (the Wi-Fi task), for every frame sent while the radio is in NiFi mode. */

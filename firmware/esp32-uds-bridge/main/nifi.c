@@ -32,7 +32,6 @@ int nifi_capture_rx(const wifi_promiscuous_pkt_t *packet, wifi_promiscuous_pkt_t
     if (with_fcs < 10 + 4) return -1;
     const uint8_t match = nifi_match(&s_match, packet->payload, with_fcs - 4);
     if (!match) return -1;
-    if (rx->rx_state == 0) nifi_host_rx(packet->payload, with_fcs - 4, callback_us); /* the DS host mode's replies */
 
     uint8_t flags = UDS_NIFI_RX_FCS;
     if (rx->rx_state != 0) flags |= UDS_NIFI_RX_ERROR;
@@ -61,5 +60,9 @@ int nifi_capture_rx(const wifi_promiscuous_pkt_t *packet, wifi_promiscuous_pkt_t
     event[14] = (uint8_t)with_fcs;
     event[15] = (uint8_t)(with_fcs >> 8);
     memcpy(event + NIFI_RX_HEADER, packet->payload, copy);
-    return sink && sink(UDS_EVT_NIFI_RX, event, NIFI_RX_HEADER + copy) ? 1 : 0;
+    const bool queued = sink && sink(UDS_EVT_NIFI_RX, event, NIFI_RX_HEADER + copy);
+    /* The DS host mode's replies: counted as heard only once queued for the host. The CMD's report (NIFI_TX) then follows the
+     * reply over USB, and the ACK never tells the DS a reply arrived that the host will not get. */
+    if (queued && rx->rx_state == 0) nifi_host_rx(packet->payload, with_fcs - 4, callback_us);
+    return queued ? 1 : 0;
 }

@@ -232,6 +232,7 @@ static void handle_command(uds_wire_frame_t *frame)
     case UDS_CMD_NIFI_START:
     case UDS_CMD_NIFI_HOST:
     case UDS_CMD_NIFI_POLL:
+    case UDS_CMD_NIFI_CMD:
     case UDS_CMD_SET_CHANNEL:
     case UDS_CMD_TX_FRAME:
     case UDS_CMD_SET_BEACON:
@@ -274,6 +275,10 @@ static void handle_command(uds_wire_frame_t *frame)
         break;
     case UDS_CMD_NIFI_POLL:
         result = nifi_host_poll(p, n);
+        break;
+    case UDS_CMD_NIFI_CMD:
+        /* One per CMD: answered only when refused (NIFI_TX reports the rest). */
+        if ((result = nifi_host_cmd(p, n)) == ESP_OK) return;
         break;
     case UDS_CMD_STOP:
         result = radio_stop();
