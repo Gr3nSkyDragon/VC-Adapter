@@ -25,7 +25,7 @@ and what is alpha). **`uds` changed meaning in 2.1**: 2.0-uds had both sides and
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.1-uds** | new in 2.1 | A board on a PC's USB whose host only speaks 3DS: Azahar, PokeUDS (and mGBA's 3DS side) | The 3DS side alone: it boots in 3DS mode, so a host connecting never restarts it or drops its USB port | ESP32-S3, S2; alpha: ESP32, C3, C6 |
+| **2.1-uds** | new in 2.1 | A board on a PC's USB whose host only speaks 3DS or DS: Azahar, PokeUDS, melonDS_Nifi (and mGBA's 3DS side) | The 3DS side and the DS side (NiFi), no Switch side: it boots in 3DS mode, so a host connecting never restarts it or drops its USB port | ESP32-S3, S2; alpha: ESP32, C3, C6 |
 | **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for mGBA-LDN, a GB-Link through `uds-gblink-relay` or GB-Link's own clients | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks | ESP32-S3; alpha: ESP32, C3, C6 |
 | **2.1-aio** | 2.0-aio; 2.0 and 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the GB/GBA games, wired to the console's link port (`../../VC-Adapter-DIY`) | The 3DS side and the Switch side on the link port, running on its own: Game Boy games through the 3DS side, FireRed, LeafGreen and Emerald through the GBA Wireless Adapter emulated on the port (`rfu/`), Ruby and Sapphire through their link cable (`cable/`) | ESP32-S3 only |
 
@@ -141,8 +141,8 @@ its log.
 ## Flashing a pre-built firmware (no ESP-IDF needed)
 
 Each release ships one file per line and chip (bootloader, partition table and app merged):
-`esp32-uds-bridge-2.1-uds-<chip>.bin`, **firmware 2.1-uds**, for a board on the PC's USB used by Azahar or PokeUDS (the 3DS side
-alone); `esp32-uds-bridge-2.1-ldn-<chip>.bin`, **firmware 2.1-ldn**, for one used by mGBA-LDN or a GB-Link through
+`esp32-uds-bridge-2.1-uds-<chip>.bin`, **firmware 2.1-uds**, for a board on the PC's USB used by Azahar, PokeUDS or melonDS_Nifi (the 3DS
+side and the DS side, no Switch side); `esp32-uds-bridge-2.1-ldn-<chip>.bin`, **firmware 2.1-ldn**, for one used by mGBA-LDN or a GB-Link through
 uds-gblink-relay (the 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks); both for `esp32s3` and,
 as alpha builds not yet run on hardware, `esp32`, `esp32c3` and `esp32c6`; 2.1-uds also for `esp32s2`; and `esp32-uds-bridge-2.1-aio-esp32s3.bin`, **firmware
 2.1-aio**, for the VC-Adapter board on the console's link port (the 3DS side and the Switch side; 1.9 was Game Boy only). In 2.0 the ldn line was
@@ -322,7 +322,8 @@ usb_dropped`), `0x86` PONG.
 
 ## Nintendo DS capture (NiFi), work in progress
 
-Firmware with HELLO_ACK feature `0x08` (`UDS_HELLO_FEATURE_NIFI`) can capture Nintendo DS local wireless, the first step towards
+The uds line only (`CONFIG_UDS_NIFI`, on in `sdkconfig.uds`'s builds and unavailable in ldn and aio, which answer the NIFI_*
+commands with ESP_ERR_NOT_SUPPORTED). Firmware with HELLO_ACK feature `0x08` (`UDS_HELLO_FEATURE_NIFI`) can capture Nintendo DS local wireless, the first step towards
 melonDS trading with a retail DS (`main/nifi.h`). Run on an ESP32-S3 (2.1-uds) for two captures of retail DSes trading; the
 reply side (the board taking part in a session) is not written yet.
 

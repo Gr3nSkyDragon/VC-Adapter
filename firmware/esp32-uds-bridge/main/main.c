@@ -46,6 +46,12 @@
 #else
 #define FEATURE_NO_SWITCH 0
 #endif
+/* The DS side (NiFi): the uds line only (Kconfig.projbuild, UDS_NIFI). */
+#if CONFIG_UDS_NIFI
+#define FEATURE_NIFI (UDS_HELLO_FEATURE_NIFI | UDS_HELLO_FEATURE_NIFI_HOST)
+#else
+#define FEATURE_NIFI 0
+#endif
 #define RX_RING_BYTES CONFIG_UDS_EVENT_RING_BYTES /* 48 KB on the S3 and C6, 16 KB on the classic and C3 */
 #define STATS_INTERVAL_US (5 * 1000 * 1000)
 /* The Switch side's "LDN_" moves the board to Switch LDN mode only while no 3DS host is talking: before the first valid frame since
@@ -256,7 +262,7 @@ static void handle_command(uds_wire_frame_t *frame)
         diag_report("hello"); /* a host that opened the port after boot gets the memory figures too */
         uint8_t payload[10] = {PROTOCOL_VERSION, FW_MAJOR, FW_MINOR};
         esp_efuse_mac_get_default(payload + 3);
-        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH | UDS_HELLO_FEATURE_NIFI | UDS_HELLO_FEATURE_NIFI_HOST;
+        payload[9] = FEATURE_LINK_PORT | FEATURE_NO_SWITCH | FEATURE_NIFI;
         send_frame(UDS_EVT_HELLO_ACK, frame->seq, 0, payload, sizeof(payload));
         return;
     }
@@ -265,6 +271,14 @@ static void handle_command(uds_wire_frame_t *frame)
         result = (n == 7 || n == 8) ? radio_start(p[0], p + 1, n == 8 && (p[7] & 1))
                                     : ESP_ERR_INVALID_SIZE;
         break;
+#if !CONFIG_UDS_NIFI
+    case UDS_CMD_NIFI_START:
+    case UDS_CMD_NIFI_HOST:
+    case UDS_CMD_NIFI_POLL:
+    case UDS_CMD_NIFI_CMD:
+        result = ESP_ERR_NOT_SUPPORTED; /* the ldn and aio lines have no DS side */
+        break;
+#else
     case UDS_CMD_NIFI_START:
         /* {channel, flags, mac[6]}: the DS capture (nifi.h). */
         result = n == 8 ? radio_start_nifi(p[0], p + 2, p[1]) : ESP_ERR_INVALID_SIZE;
@@ -280,6 +294,7 @@ static void handle_command(uds_wire_frame_t *frame)
         /* One per CMD: answered only when refused (NIFI_TX reports the rest). */
         if ((result = nifi_host_cmd(p, n)) == ESP_OK) return;
         break;
+#endif
     case UDS_CMD_STOP:
         result = radio_stop();
         break;

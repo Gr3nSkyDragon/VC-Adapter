@@ -80,7 +80,7 @@
 #define UDS_HELLO_FEATURE_NO_SWITCH 0x04 /* 2.1 on: no Switch side (the uds line; aio images from before its GBA side), so it boots
                                           * in 3DS mode and HELLO never restarts it. Clear on the ldn and aio lines, and on every 2.0
                                           * and older image. */
-#define UDS_HELLO_FEATURE_NIFI 0x08      /* NIFI_START and NIFI_RX: the DS capture */
+#define UDS_HELLO_FEATURE_NIFI 0x08      /* NIFI_START and NIFI_RX: the DS capture (the uds line only: CONFIG_UDS_NIFI) */
 #define UDS_HELLO_FEATURE_NIFI_HOST 0x10 /* NIFI_HOST, NIFI_POLL and NIFI_TX: the board as a DS host (an experiment) */
 #define UDS_EVT_STATUS 0x82    /* {request_type:u8, result:s32 LE}, echoes the request seq */
 #define UDS_EVT_RX 0x83        /* {channel:u8, rssi:s8, rx_flags:u8, mpdu...} */

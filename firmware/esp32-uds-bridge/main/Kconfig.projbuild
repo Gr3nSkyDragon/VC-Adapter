@@ -35,6 +35,16 @@ config UDS_FIRMWARE_LINE
         games (sdkconfig.aio: link port; the 3DS side for Game Boy games, the Switch side for GBA games through the emulated Wireless
         Adapter).
 
+config UDS_NIFI
+    bool "DS side: Nintendo DS local wireless (NiFi), for melonDS_Nifi"
+    depends on !UDS_SWITCH_LDN && !UDS_LINK_PORT
+    default y
+    help
+        The DS capture and the board as a DS host (nifi.c, nifi_host.c, nifi_match.c; uds_wire.h's NIFI_* commands), which
+        melonDS_Nifi uses to host a retail DS. The uds line only: it is the image Azahar, PokeUDS and melonDS_Nifi share, all of them
+        hosts on a computer. The ldn and aio lines leave it out (nifi_none.c answers its commands with ESP_ERR_NOT_SUPPORTED), and
+        HELLO_ACK sets UDS_HELLO_FEATURE_NIFI and _NIFI_HOST only when it is in.
+
 menu "Memory (per chip)"
 
 config UDS_WIFI_STATIC_RX_BUFFERS

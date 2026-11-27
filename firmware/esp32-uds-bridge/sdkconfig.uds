@@ -3,5 +3,6 @@
 # first HELLO never restarts it (no USB drop, no port coming back under another name, as macOS can do), and the RAM the Switch side
 # kept is free. package-release-bin.ps1 -Line uds builds it; by hand:
 #   idf.py -B build-uds-esp32s3 -D IDF_TARGET=esp32s3 -D SDKCONFIG=build-uds-esp32s3/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.uds" build
-# HELLO_ACK sets UDS_HELLO_FEATURE_NO_SWITCH (uds_wire.h), which tells it from the ldn line.
+# HELLO_ACK sets UDS_HELLO_FEATURE_NO_SWITCH (uds_wire.h), which tells it from the ldn line. With the Switch side off, the DS side
+# (NiFi, CONFIG_UDS_NIFI, for melonDS_Nifi) defaults on: this line is the only one that has it.
 # CONFIG_UDS_SWITCH_LDN is not set

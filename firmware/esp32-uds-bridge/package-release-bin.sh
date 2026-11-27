@@ -5,7 +5,7 @@
 # Needs ESP-IDF v6.1 (commit fff9895c82d744c7237be8847347bdd1b07c6643) installed for every chip it builds
 # (./install.sh esp32,esp32s2,esp32c3,esp32c6,esp32s3), set up first:  . <ESP-IDF v6.1>/export.sh
 #   ./package-release-bin.sh                      # everything: ../../release/esp32-uds-bridge-2.1-<line>-<chip>.bin
-#   ./package-release-bin.sh uds                  # 2.1-uds (3DS side only: Azahar, PokeUDS) for the five chips
+#   ./package-release-bin.sh uds                  # 2.1-uds (3DS and DS sides: Azahar, PokeUDS, melonDS_Nifi) for the five chips
 #   ./package-release-bin.sh uds esp32c6          # one image
 #   ./package-release-bin.sh ldn                  # 2.1-ldn (3DS and Switch sides: mGBA-LDN) for the four chips (no S2)
 #   ./package-release-bin.sh aio                  # 2.1-aio (esp32s3)

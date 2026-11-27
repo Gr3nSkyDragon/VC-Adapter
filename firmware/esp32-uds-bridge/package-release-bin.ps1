@@ -2,8 +2,8 @@
 # a GitHub release, so users can flash without installing ESP-IDF. package-release-bin.sh does the same on Linux and WSL.
 #
 # Three firmware lines, from the same code (FIRMWARE.md):
-#   uds  firmware 2.1-uds (new in 2.1; sdkconfig.defaults + sdkconfig.uds): the 3DS side alone, for a board on a PC whose host only
-#        speaks 3DS (Azahar, PokeUDS). It boots in 3DS mode, so HELLO never restarts it.
+#   uds  firmware 2.1-uds (new in 2.1; sdkconfig.defaults + sdkconfig.uds): the 3DS side and the DS side (NiFi, CONFIG_UDS_NIFI), no
+#        Switch side, for a board on a PC whose host only speaks 3DS or DS (Azahar, PokeUDS, melonDS_Nifi). It boots in 3DS mode, so HELLO never restarts it.
 #        Every chip: esp32s3 and esp32s2, and esp32, esp32c3 and esp32c6 (alpha: built, not yet run on hardware). The S2 has
 #        this line only (no Switch side).
 #   ldn  firmware 2.1-ldn (2.0-uds before, 1.8 / profile 1 / "gblink" before that; sdkconfig.defaults): the 3DS side and GB-Link

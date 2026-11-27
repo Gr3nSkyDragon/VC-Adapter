@@ -4,7 +4,7 @@ esp32-uds-bridge 2.1 comes as three firmware lines, built from this one source t
 
 | Line | Was | For | What it has | Chips |
 | --- | --- | --- | --- | --- |
-| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS: **Azahar, PokeUDS** | The 3DS side alone (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3, ESP32-S2; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
+| **2.1-uds** | new in 2.1 | A board on a computer whose host only speaks 3DS or DS: **Azahar, PokeUDS, melonDS_Nifi** | The 3DS side and the DS side (NiFi, `UDS_NIFI`), no Switch side (`sdkconfig.uds`): it boots in 3DS mode, so the first HELLO never restarts it and the board's USB port never drops (on macOS a dropped port can come back under another name) | ESP32-S3, ESP32-S2; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
 | **2.1-ldn** | 2.0-uds; 1.8, profile 1, `gblink` | A board on a PC's or phone's USB for **mGBA-LDN** (and a GB-Link through `uds-gblink-relay` or GB-Link's own clients) | The 3DS side and GB-Link Switch LDN's Switch side, switching by what the host speaks: a restart each way | ESP32-S3; **alpha:** classic ESP32, ESP32-C3, ESP32-C6 |
 | **2.1-aio** | 2.0-aio; 1.9 (beta), profile 2, `vcadapter` | The standalone VC-Adapter board for the **GB/GBA games**, wired to the console's link port (`../../VC-Adapter-DIY`), no PC | The 3DS side and the Switch side on the link port, running on its own: Game Boy games through the 3DS side, FireRed, LeafGreen and Emerald through the GBA Wireless Adapter emulated on the port (`rfu/`), Ruby and Sapphire through their link cable (`cable/`) | ESP32-S3 only |
 

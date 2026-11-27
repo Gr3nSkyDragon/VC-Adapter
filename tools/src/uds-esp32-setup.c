@@ -14,8 +14,9 @@
  * picks the one it is left in: for the Switch side, the tool ends by sending what GB-Link Switch LDN's own hosts send ("LDN_"), which
  * moves the board over, and checks that its Switch side answers. Hosts move it back and forth later as before.
  *
- * The firmware comes in three lines (package-release-bin.ps1), two of them for a board on the PC's USB: 2.1-uds (the 3DS side alone,
- * for Azahar and PokeUDS: it never restarts when a host connects) and 2.1-ldn (the 3DS side and GB-Link Switch LDN's Switch side, for
+ * The firmware comes in three lines (package-release-bin.ps1), two of them for a board on the PC's USB: 2.1-uds (the 3DS side and
+ * the DS side, NiFi, for Azahar, PokeUDS and melonDS_Nifi: it never restarts when a host connects; no Switch side, so the Switch
+ * keys and "Default mode" are off while it is the build being flashed, and melonDS_Nifi needs no 3DS key either) and 2.1-ldn (the 3DS side and GB-Link Switch LDN's Switch side, for
  * mGBA-LDN; 2.0 called this line uds, 1.8 the GB-Link build); and 2.1-aio (was 1.9, the VC-Adapter board build: the 3DS side for
  * Game Boy games, the Switch side for GBA games), for a board wired to the console's link port. The "Build for" choice picks the
  * newest image of that line next to this program; an image's line is read from its version (2.1-uds, 2.1-ldn, 2.0-uds = ldn, 1.9-vcadapter...), and an image from before
@@ -97,6 +98,7 @@ struct Job {
 	char port[32];
 	bool usbJtag;
 	bool startSwitch; // leave the board in its Switch side ("Default mode")
+	bool noSwitch;    // flashing the uds line: no Switch side, so no Switch keys or mode
 };
 
 static int _px(int value) {
@@ -105,7 +107,7 @@ static int _px(int value) {
 
 enum Build {
 	BUILD_UNKNOWN,
-	BUILD_UDS,       // 2.1-uds: the 3DS side alone
+	BUILD_UDS,       // 2.1-uds: the 3DS and DS (NiFi) sides, no Switch side
 	BUILD_LDN,       // 2.1-ldn: the 3DS and Switch sides (2.0-uds, 1.8-gblink)
 	BUILD_VCADAPTER, // 2.1-aio: the VC-Adapter board (2.0-aio, 1.9-vcadapter)
 };
@@ -113,7 +115,7 @@ enum Build {
 static const char* _buildName(enum Build build) {
 	switch (build) {
 	case BUILD_UDS:
-		return "uds line (3DS side only)";
+		return "uds line (3DS and DS sides)";
 	case BUILD_LDN:
 		return "ldn line (3DS and Switch sides)";
 	case BUILD_VCADAPTER:
@@ -419,7 +421,11 @@ static DWORD WINAPI _work(LPVOID param) {
 		_log("The board starts in 3DS mode (Game Boy trades)");
 	}
 	ok = true;
-	if (job->flash && (!job->key || !job->switchKeys)) {
+	if (job->flash && job->noSwitch) {
+		summary = job->key ? "Done: the firmware is flashed and the 3DS key stored. The board is ready for Azahar, PokeUDS and melonDS_Nifi."
+		                   : "Done: the firmware is flashed. It is ready for melonDS_Nifi; store the 3DS key too before 3DS trades "
+		                     "(Azahar, PokeUDS).";
+	} else if (job->flash && (!job->key || !job->switchKeys)) {
 		summary = job->key ? "Done: the firmware is flashed and the 3DS key stored. Store the Switch keys too: flashing erased them."
 		        : job->switchKeys ? "Done: the firmware is flashed and the Switch keys stored. Store the 3DS key too: flashing erased it."
 		                          : "Done: the firmware is flashed. Store the keys before trading: flashing erased them.";
@@ -494,13 +500,21 @@ static void _showFirmwareInfo(void) {
 	SetWindowTextA(_item(ID_FW_INFO), text);
 }
 
+static enum Build _selectedBuild(void);
+
+// Flashing the uds line: it has no Switch side, so there are no Switch keys to store and no Switch mode to start in.
+static bool _flashingNoSwitch(void) {
+	return IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED && _selectedBuild() == BUILD_UDS;
+}
+
 static void _updateEnabled(void) {
 	bool flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
+	bool noSwitch = _flashingNoSwitch();
 	bool key = IsDlgButtonChecked(sWindow, ID_KEY_CHECK) == BST_CHECKED;
-	bool switchKeys = IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
+	bool switchKeys = !noSwitch && IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
 	EnableWindow(_item(ID_FW_CHECK), !sBusy);
 	EnableWindow(_item(ID_KEY_CHECK), !sBusy);
-	EnableWindow(_item(ID_SWITCH_CHECK), !sBusy);
+	EnableWindow(_item(ID_SWITCH_CHECK), !sBusy && !noSwitch);
 	EnableWindow(_item(ID_FW_EDIT), !sBusy && flash);
 	EnableWindow(_item(ID_FW_BROWSE), !sBusy && flash);
 	EnableWindow(_item(ID_BUILD_UDS), !sBusy && flash);
@@ -510,8 +524,9 @@ static void _updateEnabled(void) {
 	EnableWindow(_item(ID_KEY_BROWSE), !sBusy && key);
 	EnableWindow(_item(ID_SWITCH_EDIT), !sBusy && switchKeys);
 	EnableWindow(_item(ID_SWITCH_BROWSE), !sBusy && switchKeys);
-	EnableWindow(_item(ID_MODE_SWITCH), !sBusy);
-	EnableWindow(_item(ID_MODE_3DS), !sBusy);
+	EnableWindow(_item(ID_MODE_LABEL), !noSwitch);
+	EnableWindow(_item(ID_MODE_SWITCH), !sBusy && !noSwitch);
+	EnableWindow(_item(ID_MODE_3DS), !sBusy && !noSwitch);
 	EnableWindow(_item(ID_PORT_COMBO), !sBusy);
 	EnableWindow(_item(ID_PORT_REFRESH), !sBusy);
 	EnableWindow(_item(ID_START), !sBusy && (flash || key || switchKeys));
@@ -559,8 +574,8 @@ static bool _buildMatches(const char* path) {
 	}
 	char text[600];
 	snprintf(text, sizeof(text),
-	         "This image is the %s, but \"Build for\" says the %s.\n\nThe uds line is for a board on the PC's USB used by Azahar or "
-	         "PokeUDS; the ldn line is for one used by mGBA-LDN (3DS and Switch); the VC-Adapter board build is for a board wired to "
+	         "This image is the %s, but \"Build for\" says the %s.\n\nThe uds line is for a board on the PC's USB used by Azahar, "
+	         "PokeUDS or melonDS_Nifi; the ldn line is for one used by mGBA-LDN (3DS and Switch); the VC-Adapter board build is for a board wired to "
 	         "the console's link port.\n\nFlash it anyway?",
 	         _buildName(build), _buildName(selected));
 	return MessageBoxA(sWindow, text, TITLE, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
@@ -570,8 +585,10 @@ static void _start(void) {
 	struct Job* job = calloc(1, sizeof(*job));
 	job->flash = IsDlgButtonChecked(sWindow, ID_FW_CHECK) == BST_CHECKED;
 	job->key = IsDlgButtonChecked(sWindow, ID_KEY_CHECK) == BST_CHECKED;
-	job->switchKeys = IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
-	job->startSwitch = IsDlgButtonChecked(sWindow, ID_MODE_SWITCH) == BST_CHECKED;
+	const bool noSwitch = _flashingNoSwitch();
+	job->noSwitch = noSwitch;
+	job->switchKeys = !noSwitch && IsDlgButtonChecked(sWindow, ID_SWITCH_CHECK) == BST_CHECKED;
+	job->startSwitch = !noSwitch && IsDlgButtonChecked(sWindow, ID_MODE_SWITCH) == BST_CHECKED;
 	GetWindowTextA(_item(ID_FW_EDIT), job->firmware, sizeof(job->firmware));
 	GetWindowTextA(_item(ID_KEY_EDIT), job->keys, sizeof(job->keys));
 	GetWindowTextA(_item(ID_SWITCH_EDIT), job->prodKeys, sizeof(job->prodKeys));
@@ -582,7 +599,7 @@ static void _start(void) {
 	} else if (job->flash && !job->firmware[0]) {
 		problem = "Choose the firmware file (esp32-uds-bridge-2.1-<uds, ldn or aio>-esp32s3.bin).";
 	} else if (job->key && !job->keys[0]) {
-		problem = "Choose your aes_keys.txt.";
+		problem = "Choose your aes_keys.txt, or untick \"Store the 3DS key\" (melonDS_Nifi needs no key; 3DS trades do).";
 	} else if (job->switchKeys && !job->prodKeys[0]) {
 		problem = "Choose your prod.keys (the Switch keys).";
 	}
@@ -733,7 +750,7 @@ static void _create(void) {
 	_control("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_FW_BROWSE, 488, 33, 100, 26);
 	_control("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, ID_FW_INFO, 32, 62, 556, 18);
 	_control("STATIC", "Build for:", SS_LEFT, ID_BUILD_LABEL, 32, 88, 70, 20);
-	_control("BUTTON", "3DS only (2.1-uds)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_UDS, 104, 86, 140, 22);
+	_control("BUTTON", "3DS + DS (2.1-uds)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_BUILD_UDS, 104, 86, 140, 22);
 	_control("BUTTON", "3DS + Switch (2.1-ldn)", BS_AUTORADIOBUTTON, ID_BUILD_LDN, 248, 86, 160, 22);
 	_control("BUTTON", "VC-Adapter board (2.1-aio)", BS_AUTORADIOBUTTON, ID_BUILD_VCADAPTER, 412, 86, 176, 22);
 	_control("BUTTON", "Store the 3DS key from:", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, ID_KEY_CHECK, 12, 120, 400, 20);
@@ -776,7 +793,9 @@ static void _create(void) {
 	_loadSetting("mode", path, sizeof(path));
 	CheckRadioButton(sWindow, ID_MODE_SWITCH, ID_MODE_3DS, !strcmp(path, "3ds") ? ID_MODE_3DS : ID_MODE_SWITCH);
 	CheckDlgButton(sWindow, ID_FW_CHECK, BST_CHECKED);
-	CheckDlgButton(sWindow, ID_KEY_CHECK, BST_CHECKED);
+	// No aes_keys.txt saved or found (no Azahar or Citra here: a melonDS_Nifi user, say): the 3DS key starts unticked.
+	GetWindowTextA(_item(ID_KEY_EDIT), path, sizeof(path));
+	CheckDlgButton(sWindow, ID_KEY_CHECK, path[0] ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(sWindow, ID_SWITCH_CHECK, BST_CHECKED);
 	_showFirmwareInfo();
 	_refreshPorts();
@@ -803,6 +822,7 @@ static LRESULT CALLBACK _windowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 				enum Build build = _selectedBuild();
 				_saveSetting("build", build == BUILD_VCADAPTER ? "vcadapter" : build == BUILD_UDS ? "uds" : "ldn");
 				_pickFirmware();
+				_updateEnabled();
 			}
 			break;
 		case ID_MODE_SWITCH:

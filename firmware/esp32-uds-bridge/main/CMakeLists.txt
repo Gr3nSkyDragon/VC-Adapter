@@ -19,9 +19,17 @@ else()
         "gbwrap/uds-session.c" "gbwrap/uds-pia.c" "gbwrap/uds-room.c" "gbwrap/uds-ccmp.c" "gbwrap/uds-clock.c")
 endif()
 
+if(CONFIG_UDS_NIFI)
+    # The DS side (NiFi): the uds line only (Kconfig.projbuild, UDS_NIFI).
+    set(nifi_sources "nifi.c" "nifi_host.c" "nifi_match.c")
+else()
+    set(nifi_sources "nifi_none.c")
+endif()
+
 idf_component_register(
-    SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "nifi.c" "nifi_host.c" "nifi_match.c" "uds_wire.c" "keys.c" "display.c" "scene.c" "screen.c"
+    SRCS "main.c" "board.c" "bridge_mode.c" "diag.c" "radio.c" "uds_wire.c" "keys.c" "display.c" "scene.c" "screen.c"
          "port_watch.c"
+         ${nifi_sources}
          ${gbwrap_sources}
     INCLUDE_DIRS "." "gbwrap/include"
     REQUIRES esp_wifi esp_event esp_netif esp_timer nvs_flash esp_ringbuf ${driver_requires}
