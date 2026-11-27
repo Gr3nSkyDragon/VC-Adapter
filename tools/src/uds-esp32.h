@@ -203,6 +203,8 @@ struct UDSEsp32Handlers {
 	void (*status)(void* context, uint8_t requestType, int32_t result);
 	void (*log)(void* context, const char* text, size_t length);
 	void (*txDone)(void* context, bool acked, size_t length);
+	// The same, with the first bytes of the frame (up to 48, `copied`): which frame it was.
+	void (*txDoneFrame)(void* context, bool acked, const uint8_t* frame, size_t copied, size_t length);
 	// The wrapper on the board: its state changed (room, session, wire phase, generation, channel), or its 5-second counters.
 	void (*gbState)(void* context, const uint8_t state[5]);
 	void (*gbStats)(void* context, const uint32_t stats[UDS_ESP32_GB_STATS]);

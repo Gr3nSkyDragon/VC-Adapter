@@ -339,6 +339,9 @@ static void _dispatch(struct UDSEsp32* esp, const struct UDSEsp32Frame* frame) {
 			if (esp->handlers.txDone) {
 				esp->handlers.txDone(esp->handlers.context, p[0] != 0, p[1] | ((size_t) p[2] << 8));
 			}
+			if (esp->handlers.txDoneFrame) {
+				esp->handlers.txDoneFrame(esp->handlers.context, p[0] != 0, &p[3], frame->length - 3, p[1] | ((size_t) p[2] << 8));
+			}
 		}
 		break;
 	default:

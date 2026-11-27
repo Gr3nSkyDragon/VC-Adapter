@@ -206,7 +206,9 @@ static void tx_done(uint8_t ifidx, uint8_t *data, uint16_t *length, bool success
     if (ifidx != WIFI_IF_STA || !s_sink || !data || !length || *length < 24) return;
     if (s_nifi) {
         nifi_host_tx_done(data, *length, esp_timer_get_time()); /* the DS host mode's CMDs and ACKs */
-        return;
+        /* The DS host mode's unicast management frames (authentication and association responses) are reported below as in
+         * 3DS mode: whether the DS acknowledged them says whether a join failed on the air. Its data frames are not. */
+        if ((data[4] & 1) || ((data[0] >> 2) & 3) != 0) return;
     }
     const uint8_t frame_type = (data[0] >> 2) & 3;
     if (data[4] & 1) return; /* group addressed: no ACK to report */
